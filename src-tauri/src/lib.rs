@@ -1,5 +1,6 @@
 mod commands;
 mod core;
+mod file_watcher;
 mod seeding;
 mod tray;
 
@@ -50,12 +51,24 @@ pub fn run() {
             if let Err(e) = seeding::seed_presets(&claude_dir, TARGET_NAME) {
                 eprintln!("[seed] failed to seed presets: {}", e);
             }
-            if let Ok(eng) = app.state::<AppState>().engine.lock() {
+            let target_path = {
+                let state = app.state::<AppState>();
+                let eng = state.engine.lock().expect("engine mutex poisoned");
                 if let Err(e) = eng.ensure_backup() {
                     eprintln!("[seed] failed to ensure origin backup: {}", e);
                 }
-            }
+                eng.target().to_path_buf()
+            };
             tray::setup(app.handle())?;
+            match file_watcher::start(app.handle().clone(), target_path) {
+                Ok(handle) => {
+                    // Keep the watcher alive for the app lifetime by parking it
+                    // in app state — `manage` of a separate type so it doesn't
+                    // collide with AppState.
+                    app.manage(handle);
+                }
+                Err(e) => eprintln!("[watcher] start failed: {}", e),
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

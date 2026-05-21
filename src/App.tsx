@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ProfileEditor, { type EditorTarget } from "./components/ProfileEditor";
 import ConflictDialog, {
   type DriftChoice,
@@ -15,6 +16,7 @@ export type ProfileSummary = {
 function App() {
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [active, setActive] = useState<string>("origin");
+  const [hasDrift, setHasDrift] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorTarget | null>(null);
   const [drift, setDrift] = useState<{
@@ -24,10 +26,14 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const list = await invoke<ProfileSummary[]>("list_profiles");
-      const current = await invoke<string>("get_active_profile");
+      const [list, current, driftInfo] = await Promise.all([
+        invoke<ProfileSummary[]>("list_profiles"),
+        invoke<string>("get_active_profile"),
+        invoke<DriftInfo | null>("check_drift"),
+      ]);
       setProfiles(list);
       setActive(current);
+      setHasDrift(driftInfo !== null);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -36,6 +42,21 @@ function App() {
 
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Listen for external edits to CLAUDE.md. The backend emits this whenever
+  // the file is modified on disk (debounced); we just re-query state so the
+  // drift indicator stays current.
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    (async () => {
+      unlisten = await listen("claude-md:changed", () => {
+        refresh();
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
   }, [refresh]);
 
   const safeInvoke = useCallback(
@@ -136,6 +157,11 @@ function App() {
           <h1>Claude.md Toggler</h1>
           <p className="subtitle">
             Active: <strong>{active}</strong>
+            {hasDrift && (
+              <span className="drift-badge" title="CLAUDE.md was edited outside the app">
+                edited
+              </span>
+            )}
           </p>
         </header>
 
