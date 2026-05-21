@@ -55,6 +55,12 @@ pub fn run() {
             commands::list_profiles,
             commands::get_active_profile,
             commands::toggle_profile,
+            commands::read_profile,
+            commands::create_profile,
+            commands::update_profile,
+            commands::delete_profile,
+            commands::rename_profile,
+            commands::duplicate_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

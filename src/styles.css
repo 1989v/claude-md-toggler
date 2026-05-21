@@ -42,14 +42,23 @@ header h1 {
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.profiles h2 {
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.section-head h2 {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #6b7280;
-  margin: 0 0 8px;
+  margin: 0;
 }
 
 .profiles ul {
@@ -58,33 +67,77 @@ header h1 {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .profiles li {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  align-items: stretch;
   border-radius: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.profiles li:hover {
-  background: #1f2937;
+  overflow: hidden;
+  background: #11161d;
+  border: 1px solid #1f2937;
 }
 
 .profiles li.active {
-  background: #1e3a8a;
-  color: white;
+  background: #112048;
+  border-color: #1e40af;
 }
 
-.profiles li em {
-  margin-left: auto;
-  color: #6b7280;
-  font-style: normal;
-  font-size: 11px;
+.row-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.row-main:hover {
+  background: #1f2937;
+}
+
+.profiles li.active .row-main:hover {
+  background: #1e3a8a;
+}
+
+.row-main .name {
+  flex: 1;
+}
+
+.row-actions {
+  display: flex;
+  align-items: stretch;
+  border-left: 1px solid #1f2937;
+}
+
+.profiles li.active .row-actions {
+  border-left-color: #1e40af;
+}
+
+.row-actions .icon {
+  background: transparent;
+  color: #9ca3af;
+  border: none;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 13px;
+  min-width: 32px;
+}
+
+.row-actions .icon:hover {
+  background: #1f2937;
+  color: #e5e7eb;
+}
+
+.row-actions .icon.danger:hover {
+  background: #3f1d1d;
+  color: #fca5a5;
 }
 
 .dot {
@@ -92,10 +145,19 @@ header h1 {
   height: 8px;
   border-radius: 50%;
   background: #374151;
+  flex-shrink: 0;
 }
 
 .profiles li.active .dot {
   background: #60a5fa;
+}
+
+.badge {
+  font-size: 10px;
+  font-style: normal;
+  text-transform: uppercase;
+  color: #6b7280;
+  letter-spacing: 0.05em;
 }
 
 footer {
@@ -109,8 +171,101 @@ button {
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
+  font: inherit;
 }
 
 button:hover {
   background: #374151;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: #1f2937;
+  color: #9ca3af;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+button.ghost:hover {
+  background: #1f2937;
+  color: #e5e7eb;
+}
+
+button.primary {
+  background: #1e40af;
+  border-color: #1e3a8a;
+}
+
+button.primary:hover {
+  background: #1d4ed8;
+}
+
+/* Editor view */
+
+.editor .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.editor .field.grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.editor .field span {
+  font-size: 12px;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.editor .field small {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.editor input,
+.editor textarea {
+  background: #11161d;
+  border: 1px solid #1f2937;
+  color: #e5e7eb;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.editor textarea {
+  flex: 1;
+  resize: none;
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 280px;
+}
+
+.editor input:focus,
+.editor textarea:focus {
+  border-color: #1e40af;
+  outline: none;
+}
+
+.editor .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+code {
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  background: #11161d;
+  padding: 1px 4px;
+  border-radius: 4px;
 }
