@@ -131,11 +131,23 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
 fn apply_and_refresh(app: &AppHandle, name: &str) {
     let state = app.state::<AppState>();
+    let from = state.last_active.lock().ok().and_then(|g| g.clone());
     let result = state
         .engine
         .lock()
         .map_err(|e| e.to_string())
         .and_then(|eng| eng.apply_named(name).map_err(|e| e.to_string()));
+
+    // History recording mirrors the toggle_profile command so tray-driven
+    // toggles also show up in the viewer.
+    if let Ok(history) = state.history.lock() {
+        let _ = history.record(
+            crate::core::history::Action::Toggle,
+            from.as_deref(),
+            Some(name),
+            result.as_ref().map(|_| ()).map_err(|s| s.as_str()),
+        );
+    }
 
     if let Err(e) = result {
         eprintln!("[tray] toggle '{}' failed: {}", name, e);

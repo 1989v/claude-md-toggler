@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+use core::history::{default_db_path, HistoryStore};
 use core::profile_store::ProfileStore;
 use core::toggle_engine::ToggleEngine;
 
@@ -21,6 +22,8 @@ pub struct AppState {
     /// baseline tracks profile-file edits made through the editor UI as well
     /// as toggle operations.
     pub last_active: Mutex<Option<String>>,
+    /// Persistent append-only log of toggle/drift-resolution actions.
+    pub history: Mutex<HistoryStore>,
 }
 
 fn default_claude_dir() -> PathBuf {
@@ -41,11 +44,25 @@ pub fn run() {
     // target byte-for-byte. Falls back to "modified"/"none" handled later.
     let initial_active = store.detect_active().ok();
 
+    // Open (or create) the history database at ~/.claude/.toggler-history.db.
+    // A failure here is non-fatal — fall back to in-memory so the app keeps
+    // working even when disk persistence is broken (e.g. permissions issue).
+    let db_path = default_db_path(&claude_dir);
+    let history = HistoryStore::open(&db_path).unwrap_or_else(|e| {
+        eprintln!(
+            "[history] failed to open {} — events will not persist: {}",
+            db_path.display(),
+            e
+        );
+        HistoryStore::in_memory().expect("in-memory sqlite must always succeed")
+    });
+
     tauri::Builder::default()
         .manage(AppState {
             store: Mutex::new(store),
             engine: Mutex::new(engine),
             last_active: Mutex::new(initial_active),
+            history: Mutex::new(history),
         })
         .setup(move |app| {
             if let Err(e) = seeding::seed_presets(&claude_dir, TARGET_NAME) {
@@ -85,6 +102,7 @@ pub fn run() {
             commands::resolve_drift_apply_to_active,
             commands::resolve_drift_apply_to_origin,
             commands::resolve_drift_discard,
+            commands::list_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

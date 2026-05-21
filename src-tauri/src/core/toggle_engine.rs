@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::core::session_lock;
+
 #[derive(Debug, Error)]
 pub enum ToggleError {
     #[error("io error: {0}")]
@@ -26,13 +28,19 @@ pub enum ToggleError {
 pub struct ToggleEngine {
     target: PathBuf,
     backup: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl ToggleEngine {
     pub fn new(target: impl Into<PathBuf>) -> Self {
         let target = target.into();
         let backup = sibling_with_suffix(&target, "origin");
-        Self { target, backup }
+        let lock_path = session_lock::default_lock_path(&target);
+        Self {
+            target,
+            backup,
+            lock_path,
+        }
     }
 
     pub fn target(&self) -> &Path {
@@ -69,10 +77,15 @@ impl ToggleEngine {
 
     /// Apply the contents of `profile_path` to the target file via atomic rename.
     /// Caller is responsible for ensuring `ensure_backup()` has been called at least once.
+    ///
+    /// Acquires an OS-level advisory lock at `lock_path` for the duration of
+    /// the swap so concurrent toggler instances serialize their writes instead
+    /// of racing for the same atomic rename.
     pub fn apply_profile(&self, profile_path: &Path) -> Result<(), ToggleError> {
         if !profile_path.exists() {
             return Err(ToggleError::ProfileNotFound(profile_path.to_path_buf()));
         }
+        let _guard = session_lock::acquire_blocking(&self.lock_path)?;
         self.ensure_backup()?;
         atomic_copy(profile_path, &self.target)
     }

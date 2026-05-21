@@ -177,6 +177,77 @@ header h1 {
 
 footer {
   margin-top: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.hint {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0;
+}
+
+/* History viewer */
+
+.history .history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  flex: 1;
+}
+
+.history .history-list li {
+  border: 1px solid #1f2937;
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history .history-list li.failed {
+  border-color: #7f1d1d;
+  background: #1f0a0a;
+}
+
+.history .history-list .row-1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.history .history-list .action {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9ca3af;
+}
+
+.history .history-list .ts {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.history .history-list .row-2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.history .history-list .err-msg {
+  font-size: 11px;
+  color: #fca5a5;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 button {

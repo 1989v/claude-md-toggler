@@ -6,6 +6,7 @@ import ConflictDialog, {
   type DriftChoice,
   type DriftInfo,
 } from "./components/ConflictDialog";
+import HistoryViewer from "./components/HistoryViewer";
 
 export type ProfileSummary = {
   name: string;
@@ -23,6 +24,7 @@ function App() {
     info: DriftInfo;
     pending: string;
   } | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -142,6 +144,10 @@ function App() {
     );
   }
 
+  if (showHistory) {
+    return <HistoryViewer onClose={() => setShowHistory(false)} />;
+  }
+
   return (
     <>
       {drift && (
@@ -205,6 +211,9 @@ function App() {
 
         <footer>
           <button onClick={refresh}>Refresh</button>
+          <button className="ghost" onClick={() => setShowHistory(true)}>
+            History
+          </button>
         </footer>
       </main>
     </>

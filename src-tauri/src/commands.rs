@@ -3,8 +3,26 @@ use std::fs;
 use tauri::{AppHandle, State};
 
 use crate::core::drift::{detect as detect_drift, DriftInfo};
+use crate::core::history::{Action, HistoryEntry};
 use crate::core::profile_store::ProfileInfo;
 use crate::{record_active, tray, AppState};
+
+/// Best-effort history write — never fails the parent command. We log the
+/// error to stderr and move on, because losing a history row is strictly less
+/// bad than failing a user-initiated toggle.
+fn record_history(
+    state: &AppState,
+    action: Action,
+    from: Option<&str>,
+    to: Option<&str>,
+    result: Result<(), &str>,
+) {
+    if let Ok(history) = state.history.lock() {
+        if let Err(e) = history.record(action, from, to, result) {
+            eprintln!("[history] record failed: {}", e);
+        }
+    }
+}
 
 #[tauri::command]
 pub fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ProfileInfo>, String> {
@@ -24,10 +42,26 @@ pub fn toggle_profile(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    {
+    let from = state
+        .last_active
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let apply_result: Result<(), String> = {
         let engine = state.engine.lock().map_err(|e| e.to_string())?;
-        engine.apply_named(&name).map_err(|e| e.to_string())?;
+        engine.apply_named(&name).map_err(|e| e.to_string())
+    };
+    match &apply_result {
+        Ok(()) => record_history(&state, Action::Toggle, from.as_deref(), Some(&name), Ok(())),
+        Err(msg) => record_history(
+            &state,
+            Action::Toggle,
+            from.as_deref(),
+            Some(&name),
+            Err(msg.as_str()),
+        ),
     }
+    apply_result?;
     record_active(&state, &name);
     tray::refresh(&app).map_err(|e| e.to_string())?;
     Ok(())
@@ -149,27 +183,64 @@ pub fn resolve_drift_apply_to_active(state: State<'_, AppState>) -> Result<(), S
         let guard = state.last_active.lock().map_err(|e| e.to_string())?;
         guard.clone().ok_or_else(|| "no active profile baseline".to_string())?
     };
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let current = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
-    if last_active == "origin" {
-        // Apply to origin is handled by its own command; route there for clarity.
-        fs::write(store.profile_path("origin"), current).map_err(|e| e.to_string())?;
-    } else {
-        store
-            .write(&last_active, &current)
-            .map_err(|e| e.to_string())?;
+    let result: Result<(), String> = (|| {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let current = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
+        if last_active == "origin" {
+            fs::write(store.profile_path("origin"), current).map_err(|e| e.to_string())?;
+        } else {
+            store
+                .write(&last_active, &current)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    match &result {
+        Ok(()) => record_history(
+            &state,
+            Action::DriftApplyToActive,
+            Some(&last_active),
+            Some(&last_active),
+            Ok(()),
+        ),
+        Err(msg) => record_history(
+            &state,
+            Action::DriftApplyToActive,
+            Some(&last_active),
+            Some(&last_active),
+            Err(msg.as_str()),
+        ),
     }
-    Ok(())
+    result
 }
 
 /// Resolution: write current `CLAUDE.md` bytes into `CLAUDE.md.origin`,
 /// promoting the drift edits as the new default baseline.
 #[tauri::command]
 pub fn resolve_drift_apply_to_origin(state: State<'_, AppState>) -> Result<(), String> {
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let current = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
-    fs::write(store.profile_path("origin"), current).map_err(|e| e.to_string())?;
-    Ok(())
+    let result: Result<(), String> = (|| {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let current = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
+        fs::write(store.profile_path("origin"), current).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    match &result {
+        Ok(()) => record_history(
+            &state,
+            Action::DriftApplyToOrigin,
+            None,
+            Some("origin"),
+            Ok(()),
+        ),
+        Err(msg) => record_history(
+            &state,
+            Action::DriftApplyToOrigin,
+            None,
+            Some("origin"),
+            Err(msg.as_str()),
+        ),
+    }
+    result
 }
 
 /// Resolution: discard drift edits by re-applying the bytes of the last-active
@@ -183,10 +254,36 @@ pub fn resolve_drift_discard(
         let guard = state.last_active.lock().map_err(|e| e.to_string())?;
         guard.clone().ok_or_else(|| "no active profile baseline".to_string())?
     };
-    {
+    let result: Result<(), String> = {
         let engine = state.engine.lock().map_err(|e| e.to_string())?;
-        engine.apply_named(&last_active).map_err(|e| e.to_string())?;
+        engine.apply_named(&last_active).map_err(|e| e.to_string())
+    };
+    match &result {
+        Ok(()) => record_history(
+            &state,
+            Action::DriftDiscard,
+            None,
+            Some(&last_active),
+            Ok(()),
+        ),
+        Err(msg) => record_history(
+            &state,
+            Action::DriftDiscard,
+            None,
+            Some(&last_active),
+            Err(msg.as_str()),
+        ),
     }
+    result?;
     tray::refresh(&app).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn list_history(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<HistoryEntry>, String> {
+    let history = state.history.lock().map_err(|e| e.to_string())?;
+    history.list(limit.unwrap_or(100)).map_err(|e| e.to_string())
 }
