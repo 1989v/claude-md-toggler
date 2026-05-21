@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ProfileEditor, { type EditorTarget } from "./components/ProfileEditor";
+import ConflictDialog, {
+  type DriftChoice,
+  type DriftInfo,
+} from "./components/ConflictDialog";
 
 export type ProfileSummary = {
   name: string;
@@ -13,6 +17,10 @@ function App() {
   const [active, setActive] = useState<string>("origin");
   const [error, setError] = useState<string | null>(null);
   const [editor, setEditor] = useState<EditorTarget | null>(null);
+  const [drift, setDrift] = useState<{
+    info: DriftInfo;
+    pending: string;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -43,8 +51,41 @@ function App() {
     [refresh],
   );
 
-  const onToggle = (name: string) =>
-    safeInvoke(() => invoke("toggle_profile", { name }));
+  const onToggle = useCallback(
+    async (name: string) => {
+      try {
+        const driftInfo = await invoke<DriftInfo | null>("check_drift");
+        if (driftInfo) {
+          setDrift({ info: driftInfo, pending: name });
+          return;
+        }
+        await invoke("toggle_profile", { name });
+        await refresh();
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [refresh],
+  );
+
+  const onDriftResolved = useCallback(
+    async (choice: DriftChoice) => {
+      const pending = drift?.pending;
+      setDrift(null);
+      if (choice === "cancel" || !pending) {
+        await refresh();
+        return;
+      }
+      try {
+        await invoke("toggle_profile", { name: pending });
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        await refresh();
+      }
+    },
+    [drift, refresh],
+  );
 
   const onDelete = (name: string) => {
     if (!confirm(`Delete profile "${name}"? This cannot be undone.`)) return;
@@ -81,54 +122,66 @@ function App() {
   }
 
   return (
-    <main className="app">
-      <header>
-        <h1>Claude.md Toggler</h1>
-        <p className="subtitle">
-          Active: <strong>{active}</strong>
-        </p>
-      </header>
+    <>
+      {drift && (
+        <ConflictDialog
+          drift={drift.info}
+          pendingProfile={drift.pending}
+          onResolved={onDriftResolved}
+        />
+      )}
 
-      {error && <div className="error">{error}</div>}
+      <main className="app">
+        <header>
+          <h1>Claude.md Toggler</h1>
+          <p className="subtitle">
+            Active: <strong>{active}</strong>
+          </p>
+        </header>
 
-      <section className="profiles">
-        <div className="section-head">
-          <h2>Profiles</h2>
-          <button className="ghost" onClick={() => setEditor({ mode: "new" })}>
-            + New
-          </button>
-        </div>
+        {error && <div className="error">{error}</div>}
 
-        <ul>
-          <ProfileRow
-            name="origin"
-            isActive={active === "origin"}
-            onToggle={() => onToggle("origin")}
-            onEdit={() => setEditor({ mode: "edit", name: "origin", readOnly: true })}
-            onDuplicate={() => onDuplicate("origin")}
-            reserved
-          />
-          {profiles
-            .filter((p) => p.name !== "origin")
-            .map((p) => (
-              <ProfileRow
-                key={p.name}
-                name={p.name}
-                isActive={p.is_active}
-                onToggle={() => onToggle(p.name)}
-                onEdit={() => setEditor({ mode: "edit", name: p.name })}
-                onDuplicate={() => onDuplicate(p.name)}
-                onRename={() => onRename(p.name)}
-                onDelete={() => onDelete(p.name)}
-              />
-            ))}
-        </ul>
-      </section>
+        <section className="profiles">
+          <div className="section-head">
+            <h2>Profiles</h2>
+            <button className="ghost" onClick={() => setEditor({ mode: "new" })}>
+              + New
+            </button>
+          </div>
 
-      <footer>
-        <button onClick={refresh}>Refresh</button>
-      </footer>
-    </main>
+          <ul>
+            <ProfileRow
+              name="origin"
+              isActive={active === "origin"}
+              onToggle={() => onToggle("origin")}
+              onEdit={() =>
+                setEditor({ mode: "edit", name: "origin", readOnly: true })
+              }
+              onDuplicate={() => onDuplicate("origin")}
+              reserved
+            />
+            {profiles
+              .filter((p) => p.name !== "origin")
+              .map((p) => (
+                <ProfileRow
+                  key={p.name}
+                  name={p.name}
+                  isActive={p.is_active}
+                  onToggle={() => onToggle(p.name)}
+                  onEdit={() => setEditor({ mode: "edit", name: p.name })}
+                  onDuplicate={() => onDuplicate(p.name)}
+                  onRename={() => onRename(p.name)}
+                  onDelete={() => onDelete(p.name)}
+                />
+              ))}
+          </ul>
+        </section>
+
+        <footer>
+          <button onClick={refresh}>Refresh</button>
+        </footer>
+      </main>
+    </>
   );
 }
 

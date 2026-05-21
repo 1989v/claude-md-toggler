@@ -141,6 +141,7 @@ fn apply_and_refresh(app: &AppHandle, name: &str) {
         eprintln!("[tray] toggle '{}' failed: {}", name, e);
         return;
     }
+    crate::record_active(&state, name);
     if let Err(e) = refresh(app) {
         eprintln!("[tray] menu refresh failed: {}", e);
     }
