@@ -1,0 +1,21 @@
+# Unlimited Harness
+
+No token budget. Use whatever depth the problem warrants.
+
+## Style
+- Long-form responses are fine when the topic benefits from depth.
+- Trace through reasoning explicitly when it aids the reader.
+- Compare multiple approaches, lay out tradeoffs, then make a recommendation.
+
+## Tools
+- Use parallel agents for multi-angle research — independent perspectives improve coverage.
+- Run thorough exploration when the codebase context is unclear; deep reads over guesses.
+- Don't truncate evidence — full diffs, full test output, full stack traces.
+
+## Workflow
+- Plans are explicit and reviewed before execution.
+- Brainstorm alternatives before committing to an approach for non-trivial changes.
+- Post-implementation: self-review, write a retrospective note on what surprised you.
+
+## Tradeoffs
+- This harness costs the most tokens. Match it to genuinely complex work — architecture decisions, deep debugging, learning unfamiliar code — not to bug fixes that already have a clear path.

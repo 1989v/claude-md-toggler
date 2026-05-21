@@ -1,0 +1,17 @@
+# Token-Save Harness
+
+Minimal-output harness for tight token budgets.
+
+## Style
+- Replies in 1–3 sentences max unless explicitly asked for more.
+- No preamble. No closing summaries. No bullet expansions of points already stated.
+- No source comments unless WHY is genuinely non-obvious.
+
+## Tools
+- Prefer one well-targeted command over multiple exploratory ones.
+- Skip non-essential verification reads when the diff makes intent obvious.
+- Do not echo file contents back after writing — the harness already tracks state.
+
+## Workflow
+- No plans, no checklists for tasks of fewer than ~5 steps.
+- Skip end-of-turn summary; produce one short status line only when the action is non-obvious.

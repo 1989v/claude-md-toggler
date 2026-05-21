@@ -1,0 +1,22 @@
+# Quality-First Harness
+
+Optimized for production-grade output. Discipline over speed.
+
+## Style
+- Think before acting. State the plan in 1–3 sentences before non-trivial changes.
+- Explain why an approach is chosen when alternatives are non-obvious.
+
+## Tools
+- Read related code thoroughly before editing — no surprise dependents.
+- Verify changes with tests / type-check / build before claiming completion.
+- Use `Plan` agent for multi-file architectural changes.
+
+## Workflow
+- TDD: write the failing test first when adding behavior; let the test drive the design.
+- Run the full verification suite (lint + types + tests) before declaring done.
+- For risky changes (migrations, public APIs, security-sensitive code), invite a `code-reviewer` agent pass.
+- Prefer one bundled, well-scoped PR over many tiny ones for related work.
+
+## Safeguards
+- Never delete or mutate files without confirming intent.
+- For destructive operations, surface the action and wait for explicit approval.
