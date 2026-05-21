@@ -145,6 +145,7 @@ fn apply_and_refresh(app: &AppHandle, name: &str) {
             crate::core::history::Action::Toggle,
             from.as_deref(),
             Some(name),
+            crate::core::history::TARGET_GLOBAL,
             result.as_ref().map(|_| ()).map_err(|s| s.as_str()),
         );
     }

@@ -26,7 +26,7 @@ pub struct AppState {
     pub history: Mutex<HistoryStore>,
 }
 
-fn default_claude_dir() -> PathBuf {
+pub(crate) fn default_claude_dir() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(".claude"))
         .unwrap_or_else(|| PathBuf::from(".claude"))
@@ -103,6 +103,16 @@ pub fn run() {
             commands::resolve_drift_apply_to_origin,
             commands::resolve_drift_discard,
             commands::list_history,
+            commands::memory_list_projects,
+            commands::memory_list_profiles,
+            commands::memory_get_active_profile,
+            commands::memory_toggle_profile,
+            commands::memory_read_profile,
+            commands::memory_create_profile,
+            commands::memory_update_profile,
+            commands::memory_delete_profile,
+            commands::memory_rename_profile,
+            commands::memory_duplicate_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

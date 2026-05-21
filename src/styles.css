@@ -317,13 +317,32 @@ button.primary:hover {
 }
 
 .editor input,
-.editor textarea {
+.editor textarea,
+.field select {
   background: #11161d;
   border: 1px solid #1f2937;
   color: #e5e7eb;
   border-radius: 6px;
   padding: 8px 10px;
   font: inherit;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field span {
+  font-size: 12px;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.field small {
+  font-size: 11px;
+  color: #6b7280;
 }
 
 .editor textarea {

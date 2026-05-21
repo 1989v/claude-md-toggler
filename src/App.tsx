@@ -7,6 +7,7 @@ import ConflictDialog, {
   type DriftInfo,
 } from "./components/ConflictDialog";
 import HistoryViewer from "./components/HistoryViewer";
+import MemoryView from "./components/MemoryView";
 
 export type ProfileSummary = {
   name: string;
@@ -25,6 +26,7 @@ function App() {
     pending: string;
   } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -148,6 +150,10 @@ function App() {
     return <HistoryViewer onClose={() => setShowHistory(false)} />;
   }
 
+  if (showMemory) {
+    return <MemoryView onClose={() => setShowMemory(false)} />;
+  }
+
   return (
     <>
       {drift && (
@@ -211,6 +217,9 @@ function App() {
 
         <footer>
           <button onClick={refresh}>Refresh</button>
+          <button className="ghost" onClick={() => setShowMemory(true)}>
+            Memory
+          </button>
           <button className="ghost" onClick={() => setShowHistory(true)}>
             History
           </button>

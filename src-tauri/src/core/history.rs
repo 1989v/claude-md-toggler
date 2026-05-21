@@ -13,6 +13,11 @@ use rusqlite::{params, Connection, OpenFlags};
 use serde::Serialize;
 use thiserror::Error;
 
+/// Schema version this binary expects. Bump and add a migration arm whenever
+/// the schema changes; on startup we ALTER from whatever the file is at up
+/// to this value.
+const SCHEMA_VERSION: i32 = 1;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS toggle_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,7 +26,8 @@ CREATE TABLE IF NOT EXISTS toggle_events (
     from_name   TEXT,
     to_name     TEXT,
     ok          INTEGER NOT NULL,
-    error       TEXT
+    error       TEXT,
+    target      TEXT    NOT NULL DEFAULT 'global'
 );
 CREATE INDEX IF NOT EXISTS idx_toggle_events_ts ON toggle_events(ts DESC);
 "#;
@@ -66,6 +72,11 @@ pub struct HistoryEntry {
     pub to_name: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
+    /// Discriminator for the file the toggle was applied to. `"global"` for
+    /// `~/.claude/CLAUDE.md`, `"memory:{project-id}"` for per-project
+    /// `MEMORY.md`. Rows recorded before the column existed are reported as
+    /// `"global"` by the default value.
+    pub target: String,
 }
 
 pub struct HistoryStore {
@@ -86,6 +97,7 @@ impl HistoryStore {
                 | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
         )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -95,6 +107,7 @@ impl HistoryStore {
     pub fn in_memory() -> Result<Self, HistoryError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -103,6 +116,7 @@ impl HistoryStore {
         action: Action,
         from: Option<&str>,
         to: Option<&str>,
+        target: &str,
         result: Result<(), &str>,
     ) -> Result<i64, HistoryError> {
         let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -111,9 +125,9 @@ impl HistoryStore {
             Err(e) => (0, Some(e)),
         };
         self.conn.execute(
-            "INSERT INTO toggle_events (ts, action, from_name, to_name, ok, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![ts, action.as_str(), from, to, ok, error],
+            "INSERT INTO toggle_events (ts, action, from_name, to_name, ok, error, target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![ts, action.as_str(), from, to, ok, error, target],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -123,7 +137,7 @@ impl HistoryStore {
     pub fn list(&self, limit: usize) -> Result<Vec<HistoryEntry>, HistoryError> {
         let limit = limit.min(1000) as i64;
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, action, from_name, to_name, ok, error
+            "SELECT id, ts, action, from_name, to_name, ok, error, target
              FROM toggle_events
              ORDER BY id DESC
              LIMIT ?1",
@@ -137,6 +151,7 @@ impl HistoryStore {
                 to_name: row.get(4)?,
                 ok: row.get::<_, i64>(5)? != 0,
                 error: row.get(6)?,
+                target: row.get(7)?,
             })
         })?;
         let mut out = Vec::new();
@@ -145,6 +160,44 @@ impl HistoryStore {
         }
         Ok(out)
     }
+}
+
+/// Bring an older database forward to the current `SCHEMA_VERSION`. Each step
+/// is idempotent so re-running this on an already-migrated database is a no-op.
+fn migrate(conn: &Connection) -> Result<(), HistoryError> {
+    let current: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current >= SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    // v0 -> v1: ensure the `target` column exists. CREATE TABLE IF NOT EXISTS
+    // above adds it for fresh databases; for databases created by an older
+    // build we add it here. Detect by querying PRAGMA table_info.
+    if current < 1 {
+        let has_target_col: bool = conn
+            .prepare("PRAGMA table_info(toggle_events)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "target");
+        if !has_target_col {
+            conn.execute(
+                "ALTER TABLE toggle_events ADD COLUMN target TEXT NOT NULL DEFAULT 'global'",
+                [],
+            )?;
+        }
+    }
+
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Canonical target string for the global `~/.claude/CLAUDE.md`.
+pub const TARGET_GLOBAL: &str = "global";
+
+/// Canonical target string for a project's `MEMORY.md`. Includes the project
+/// id so the history viewer can distinguish actions across projects.
+pub fn target_for_memory(project_id: &str) -> String {
+    format!("memory:{}", project_id)
 }
 
 /// Default path under `~/.claude/`; co-located with the toggle files so a
@@ -161,7 +214,13 @@ mod tests {
     fn record_persists_a_successful_toggle() {
         let store = HistoryStore::in_memory().unwrap();
         let id = store
-            .record(Action::Toggle, Some("origin"), Some("quality-first"), Ok(()))
+            .record(
+                Action::Toggle,
+                Some("origin"),
+                Some("quality-first"),
+                TARGET_GLOBAL,
+                Ok(()),
+            )
             .unwrap();
         assert!(id > 0);
         let rows = store.list(10).unwrap();
@@ -169,6 +228,7 @@ mod tests {
         assert_eq!(rows[0].action, "toggle");
         assert_eq!(rows[0].from_name.as_deref(), Some("origin"));
         assert_eq!(rows[0].to_name.as_deref(), Some("quality-first"));
+        assert_eq!(rows[0].target, "global");
         assert!(rows[0].ok);
         assert!(rows[0].error.is_none());
     }
@@ -177,7 +237,13 @@ mod tests {
     fn record_captures_error_message_on_failure() {
         let store = HistoryStore::in_memory().unwrap();
         store
-            .record(Action::Toggle, Some("origin"), Some("nope"), Err("not found"))
+            .record(
+                Action::Toggle,
+                Some("origin"),
+                Some("nope"),
+                TARGET_GLOBAL,
+                Err("not found"),
+            )
             .unwrap();
         let rows = store.list(10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -190,7 +256,13 @@ mod tests {
         let store = HistoryStore::in_memory().unwrap();
         for name in ["a", "b", "c"] {
             store
-                .record(Action::Toggle, Some("origin"), Some(name), Ok(()))
+                .record(
+                    Action::Toggle,
+                    Some("origin"),
+                    Some(name),
+                    TARGET_GLOBAL,
+                    Ok(()),
+                )
                 .unwrap();
         }
         let rows = store.list(10).unwrap();
@@ -203,7 +275,13 @@ mod tests {
         let store = HistoryStore::in_memory().unwrap();
         for i in 0..50 {
             store
-                .record(Action::Toggle, None, Some(&format!("p{}", i)), Ok(()))
+                .record(
+                    Action::Toggle,
+                    None,
+                    Some(&format!("p{}", i)),
+                    TARGET_GLOBAL,
+                    Ok(()),
+                )
                 .unwrap();
         }
         // Asking for u64::MAX should still come back without exploding;
@@ -216,5 +294,33 @@ mod tests {
     fn action_serializes_to_kebab_case() {
         assert_eq!(Action::DriftApplyToActive.as_str(), "drift-apply-to-active");
         assert_eq!(Action::DriftDiscard.as_str(), "drift-discard");
+    }
+
+    #[test]
+    fn target_distinguishes_memory_rows_from_global() {
+        let store = HistoryStore::in_memory().unwrap();
+        store
+            .record(Action::Toggle, None, Some("a"), TARGET_GLOBAL, Ok(()))
+            .unwrap();
+        let memory_target = target_for_memory("-Users-test-proj");
+        store
+            .record(Action::Toggle, None, Some("b"), &memory_target, Ok(()))
+            .unwrap();
+
+        let rows = store.list(10).unwrap();
+        let targets: Vec<_> = rows.iter().map(|r| r.target.clone()).collect();
+        assert_eq!(targets, vec![memory_target, TARGET_GLOBAL.to_string()]);
+    }
+
+    #[test]
+    fn migrate_is_idempotent() {
+        // First open creates the table at v1.
+        let store = HistoryStore::in_memory().unwrap();
+        store
+            .record(Action::Toggle, None, Some("x"), TARGET_GLOBAL, Ok(()))
+            .unwrap();
+        // Re-running migrate against the same connection must not error.
+        super::migrate(&store.conn).unwrap();
+        assert_eq!(store.list(10).unwrap().len(), 1);
     }
 }
