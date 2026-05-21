@@ -1,7 +1,7 @@
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::core::profile_store::ProfileInfo;
-use crate::AppState;
+use crate::{tray, AppState};
 
 #[tauri::command]
 pub fn list_profiles(state: State<'_, AppState>) -> Result<Vec<ProfileInfo>, String> {
@@ -16,7 +16,16 @@ pub fn get_active_profile(state: State<'_, AppState>) -> Result<String, String> 
 }
 
 #[tauri::command]
-pub fn toggle_profile(name: String, state: State<'_, AppState>) -> Result<(), String> {
-    let engine = state.engine.lock().map_err(|e| e.to_string())?;
-    engine.apply_named(&name).map_err(|e| e.to_string())
+pub fn toggle_profile(
+    name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    {
+        let engine = state.engine.lock().map_err(|e| e.to_string())?;
+        engine.apply_named(&name).map_err(|e| e.to_string())?;
+    }
+    // Refresh tray menu so the active marker stays in sync with the window UI.
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    Ok(())
 }
