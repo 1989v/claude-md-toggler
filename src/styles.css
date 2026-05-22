@@ -450,3 +450,25 @@ code {
   background: #7f1d1d;
   color: #fecaca;
 }
+
+/* Mappings view */
+
+.mappings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mappings-form h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  margin: 0 0 4px;
+}
+
+.mappings-form .actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

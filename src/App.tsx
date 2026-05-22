@@ -8,6 +8,7 @@ import ConflictDialog, {
 } from "./components/ConflictDialog";
 import HistoryViewer from "./components/HistoryViewer";
 import MemoryView from "./components/MemoryView";
+import MappingsView from "./components/MappingsView";
 
 export type ProfileSummary = {
   name: string;
@@ -27,6 +28,7 @@ function App() {
   } | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [showMappings, setShowMappings] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -154,6 +156,17 @@ function App() {
     return <MemoryView onClose={() => setShowMemory(false)} />;
   }
 
+  if (showMappings) {
+    return (
+      <MappingsView
+        onClose={async () => {
+          setShowMappings(false);
+          await refresh();
+        }}
+      />
+    );
+  }
+
   return (
     <>
       {drift && (
@@ -219,6 +232,9 @@ function App() {
           <button onClick={refresh}>Refresh</button>
           <button className="ghost" onClick={() => setShowMemory(true)}>
             Memory
+          </button>
+          <button className="ghost" onClick={() => setShowMappings(true)}>
+            Mappings
           </button>
           <button className="ghost" onClick={() => setShowHistory(true)}>
             History

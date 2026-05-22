@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 
 use crate::core::drift::{detect as detect_drift, DriftInfo};
 use crate::core::history::{target_for_memory, Action, HistoryEntry, TARGET_GLOBAL};
+use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
 use crate::core::profile_store::ProfileInfo;
 use crate::{default_claude_dir, record_active, tray, AppState};
@@ -408,4 +409,115 @@ pub fn memory_duplicate_profile(
     store
         .duplicate(&source, &new_name)
         .map_err(|e| e.to_string())
+}
+
+// --- Directory-to-profile mappings (T7) -----------------------------------
+
+#[tauri::command]
+pub fn list_mappings(state: State<'_, AppState>) -> Result<Vec<DirectoryMapping>, String> {
+    let store = state.mappings.lock().map_err(|e| e.to_string())?;
+    store.list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_mapping(
+    dir_path: String,
+    target: String,
+    profile_name: String,
+    state: State<'_, AppState>,
+) -> Result<i64, String> {
+    let store = state.mappings.lock().map_err(|e| e.to_string())?;
+    store
+        .add(&dir_path, &target, &profile_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_mapping(
+    id: i64,
+    target: String,
+    profile_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let store = state.mappings.lock().map_err(|e| e.to_string())?;
+    store
+        .update(id, &target, &profile_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_mapping(id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let store = state.mappings.lock().map_err(|e| e.to_string())?;
+    store.delete(id).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct ApplyMappingResult {
+    /// `Some(mapping)` when a rule matched and was applied. `None` when no
+    /// registered mapping matched — the FE can show a "no rule" message.
+    pub matched: Option<DirectoryMapping>,
+}
+
+/// Find the best matching mapping for `dir_path` and apply it. For a "global"
+/// target the global toggle engine runs through the standard recording path
+/// (with history + tray refresh + drift baseline update). For a memory target
+/// the per-project engine is instantiated on the fly, history is recorded
+/// against the memory target, and no tray refresh is needed (the tray only
+/// renders the global state).
+#[tauri::command]
+pub fn apply_mapping_for(
+    dir_path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<ApplyMappingResult, String> {
+    let matched = {
+        let store = state.mappings.lock().map_err(|e| e.to_string())?;
+        store.find_match(&dir_path).map_err(|e| e.to_string())?
+    };
+    let Some(mapping) = matched else {
+        return Ok(ApplyMappingResult { matched: None });
+    };
+
+    if mapping.target == TARGET_GLOBAL {
+        // Route through the existing global flow so history/baseline/tray
+        // stay consistent.
+        let result = toggle_profile(mapping.profile_name.clone(), state, app);
+        match result {
+            Ok(()) => Ok(ApplyMappingResult {
+                matched: Some(mapping),
+            }),
+            Err(e) => Err(e),
+        }
+    } else if let Some(project_id) = mapping.target.strip_prefix("memory:") {
+        let engine = memory::engine_for(&default_claude_dir(), project_id);
+        engine.ensure_backup().map_err(|e| e.to_string())?;
+        let apply_result = engine
+            .apply_named(&mapping.profile_name)
+            .map_err(|e| e.to_string());
+        let target = target_for_memory(project_id);
+        match &apply_result {
+            Ok(()) => record_history(
+                &state,
+                Action::Toggle,
+                None,
+                Some(&mapping.profile_name),
+                &target,
+                Ok(()),
+            ),
+            Err(msg) => record_history(
+                &state,
+                Action::Toggle,
+                None,
+                Some(&mapping.profile_name),
+                &target,
+                Err(msg.as_str()),
+            ),
+        }
+        apply_result?;
+        Ok(ApplyMappingResult {
+            matched: Some(mapping),
+        })
+    } else {
+        Err(format!("unknown mapping target: {}", mapping.target))
+    }
 }

@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 use core::history::{default_db_path, HistoryStore};
+use core::mappings::MappingsStore;
 use core::profile_store::ProfileStore;
 use core::toggle_engine::ToggleEngine;
 
@@ -24,6 +25,9 @@ pub struct AppState {
     pub last_active: Mutex<Option<String>>,
     /// Persistent append-only log of toggle/drift-resolution actions.
     pub history: Mutex<HistoryStore>,
+    /// Persistent directory → profile rules. Shares the same SQLite file as
+    /// `history` (different table) so a single backup covers both.
+    pub mappings: Mutex<MappingsStore>,
 }
 
 pub(crate) fn default_claude_dir() -> PathBuf {
@@ -56,6 +60,14 @@ pub fn run() {
         );
         HistoryStore::in_memory().expect("in-memory sqlite must always succeed")
     });
+    let mappings = MappingsStore::open(&db_path).unwrap_or_else(|e| {
+        eprintln!(
+            "[mappings] failed to open {} — rules will not persist: {}",
+            db_path.display(),
+            e
+        );
+        MappingsStore::in_memory().expect("in-memory sqlite must always succeed")
+    });
 
     tauri::Builder::default()
         .manage(AppState {
@@ -63,6 +75,7 @@ pub fn run() {
             engine: Mutex::new(engine),
             last_active: Mutex::new(initial_active),
             history: Mutex::new(history),
+            mappings: Mutex::new(mappings),
         })
         .setup(move |app| {
             if let Err(e) = seeding::seed_presets(&claude_dir, TARGET_NAME) {
@@ -113,6 +126,11 @@ pub fn run() {
             commands::memory_delete_profile,
             commands::memory_rename_profile,
             commands::memory_duplicate_profile,
+            commands::list_mappings,
+            commands::add_mapping,
+            commands::update_mapping,
+            commands::delete_mapping,
+            commands::apply_mapping_for,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
