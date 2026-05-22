@@ -1,58 +1,97 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import ProfileEditor, { type EditorTarget } from "./components/ProfileEditor";
-import ConflictDialog, {
-  type DriftChoice,
-  type DriftInfo,
-} from "./components/ConflictDialog";
-import HistoryViewer from "./components/HistoryViewer";
-import MemoryView from "./components/MemoryView";
-import MappingsView from "./components/MappingsView";
 
-export type ProfileSummary = {
+type ProfileSummary = {
   name: string;
   path: string;
   is_active: boolean;
 };
 
+type MemoryProject = {
+  id: string;
+  label: string;
+  memory_path: string;
+  has_memory_file: boolean;
+};
+
+type Mode = "global" | "memory";
+
 function App() {
+  const [mode, setMode] = useState<Mode>("global");
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [active, setActive] = useState<string>("origin");
   const [hasDrift, setHasDrift] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [editor, setEditor] = useState<EditorTarget | null>(null);
-  const [drift, setDrift] = useState<{
-    info: DriftInfo;
-    pending: string;
-  } | null>(null);
-  const [showHistory, setShowHistory] = useState(false);
-  const [showMemory, setShowMemory] = useState(false);
-  const [showMappings, setShowMappings] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const [memoryProjects, setMemoryProjects] = useState<MemoryProject[]>([]);
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refreshGlobal = useCallback(async () => {
     try {
-      const [list, current, driftInfo] = await Promise.all([
+      const [list, current, drift] = await Promise.all([
         invoke<ProfileSummary[]>("list_profiles"),
         invoke<string>("get_active_profile"),
-        invoke<DriftInfo | null>("check_drift"),
+        invoke<unknown>("check_drift"),
       ]);
       setProfiles(list);
       setActive(current);
-      setHasDrift(driftInfo !== null);
+      setHasDrift(drift !== null);
       setError(null);
     } catch (e) {
       setError(String(e));
     }
   }, []);
 
+  const refreshMemory = useCallback(async () => {
+    if (!selectedProject) {
+      setProfiles([]);
+      setActive("none");
+      return;
+    }
+    try {
+      const [list, current] = await Promise.all([
+        invoke<ProfileSummary[]>("memory_list_profiles", {
+          projectId: selectedProject,
+        }),
+        invoke<string>("memory_get_active_profile", {
+          projectId: selectedProject,
+        }),
+      ]);
+      setProfiles(list);
+      setActive(current);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [selectedProject]);
+
+  const refresh = useCallback(async () => {
+    if (mode === "global") {
+      await refreshGlobal();
+    } else {
+      await refreshMemory();
+    }
+  }, [mode, refreshGlobal, refreshMemory]);
+
+  // Load memory project list once so the mode switch is instant.
+  useEffect(() => {
+    invoke<MemoryProject[]>("memory_list_projects")
+      .then((list) => {
+        setMemoryProjects(list);
+        const firstWithFile = list.find((p) => p.has_memory_file);
+        if (firstWithFile) setSelectedProject(firstWithFile.id);
+      })
+      .catch((e) => setError(String(e)));
+  }, []);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  // Listen for external edits to CLAUDE.md. The backend emits this whenever
-  // the file is modified on disk (debounced); we just re-query state so the
-  // drift indicator stays current.
+  // Realtime indicator when the underlying file changes outside the app.
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     (async () => {
@@ -65,226 +104,130 @@ function App() {
     };
   }, [refresh]);
 
-  const safeInvoke = useCallback(
-    async (fn: () => Promise<unknown>) => {
+  async function toggle(name: string) {
+    if (busy) return;
+    setError(null);
+
+    // Drift in global mode is a safety net — if the user hand-edited
+    // CLAUDE.md since the last toggle, confirm discard before we overwrite
+    // it. Memory toggles don't have an equivalent baseline yet.
+    if (mode === "global" && hasDrift) {
+      const ok = confirm(
+        "CLAUDE.md was edited outside the app. Discard those edits and switch profiles?",
+      );
+      if (!ok) return;
       try {
-        await fn();
-        await refresh();
-        setError(null);
+        await invoke("resolve_drift_discard");
       } catch (e) {
         setError(String(e));
-      }
-    },
-    [refresh],
-  );
-
-  const onToggle = useCallback(
-    async (name: string) => {
-      try {
-        const driftInfo = await invoke<DriftInfo | null>("check_drift");
-        if (driftInfo) {
-          setDrift({ info: driftInfo, pending: name });
-          return;
-        }
-        await invoke("toggle_profile", { name });
-        await refresh();
-      } catch (e) {
-        setError(String(e));
-      }
-    },
-    [refresh],
-  );
-
-  const onDriftResolved = useCallback(
-    async (choice: DriftChoice) => {
-      const pending = drift?.pending;
-      setDrift(null);
-      if (choice === "cancel" || !pending) {
-        await refresh();
         return;
       }
-      try {
-        await invoke("toggle_profile", { name: pending });
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        await refresh();
+    }
+
+    setBusy(name);
+    try {
+      if (mode === "global") {
+        await invoke("toggle_profile", { name });
+      } else {
+        if (!selectedProject) return;
+        await invoke("memory_toggle_profile", {
+          projectId: selectedProject,
+          name,
+        });
       }
-    },
-    [drift, refresh],
-  );
-
-  const onDelete = (name: string) => {
-    if (!confirm(`Delete profile "${name}"? This cannot be undone.`)) return;
-    safeInvoke(() => invoke("delete_profile", { name }));
-  };
-
-  const onRename = (name: string) => {
-    const next = prompt(`Rename "${name}" to:`, name);
-    if (!next || next === name) return;
-    safeInvoke(() =>
-      invoke("rename_profile", { oldName: name, newName: next }),
-    );
-  };
-
-  const onDuplicate = (name: string) => {
-    const next = prompt(`Duplicate "${name}" as:`, `${name}-copy`);
-    if (!next) return;
-    safeInvoke(() =>
-      invoke("duplicate_profile", { source: name, newName: next }),
-    );
-  };
-
-  if (editor) {
-    return (
-      <ProfileEditor
-        target={editor}
-        onClose={() => setEditor(null)}
-        onSaved={async () => {
-          setEditor(null);
-          await refresh();
-        }}
-      />
-    );
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
   }
 
-  if (showHistory) {
-    return <HistoryViewer onClose={() => setShowHistory(false)} />;
-  }
-
-  if (showMemory) {
-    return <MemoryView onClose={() => setShowMemory(false)} />;
-  }
-
-  if (showMappings) {
-    return (
-      <MappingsView
-        onClose={async () => {
-          setShowMappings(false);
-          await refresh();
-        }}
-      />
-    );
+  function activeLabel() {
+    if (mode === "global") return active;
+    if (!selectedProject) return "pick a project";
+    return active;
   }
 
   return (
-    <>
-      {drift && (
-        <ConflictDialog
-          drift={drift.info}
-          pendingProfile={drift.pending}
-          onResolved={onDriftResolved}
-        />
-      )}
-
-      <main className="app">
-        <header>
-          <h1>Claude.md Toggler</h1>
-          <p className="subtitle">
-            Active: <strong>{active}</strong>
-            {hasDrift && (
-              <span className="drift-badge" title="CLAUDE.md was edited outside the app">
-                edited
-              </span>
-            )}
-          </p>
-        </header>
-
-        {error && <div className="error">{error}</div>}
-
-        <section className="profiles">
-          <div className="section-head">
-            <h2>Profiles</h2>
-            <button className="ghost" onClick={() => setEditor({ mode: "new" })}>
-              + New
-            </button>
-          </div>
-
-          <ul>
-            <ProfileRow
-              name="origin"
-              isActive={active === "origin"}
-              onToggle={() => onToggle("origin")}
-              onEdit={() =>
-                setEditor({ mode: "edit", name: "origin", readOnly: true })
-              }
-              onDuplicate={() => onDuplicate("origin")}
-              reserved
-            />
-            {profiles
-              .filter((p) => p.name !== "origin")
-              .map((p) => (
-                <ProfileRow
-                  key={p.name}
-                  name={p.name}
-                  isActive={p.is_active}
-                  onToggle={() => onToggle(p.name)}
-                  onEdit={() => setEditor({ mode: "edit", name: p.name })}
-                  onDuplicate={() => onDuplicate(p.name)}
-                  onRename={() => onRename(p.name)}
-                  onDelete={() => onDelete(p.name)}
-                />
-              ))}
-          </ul>
-        </section>
-
-        <footer>
-          <button onClick={refresh}>Refresh</button>
-          <button className="ghost" onClick={() => setShowMemory(true)}>
+    <main className="pop">
+      <header className="pop-head">
+        <div className="title">
+          <span className="dot-active" />
+          <strong>{activeLabel()}</strong>
+          {mode === "global" && hasDrift && (
+            <span className="badge-edit" title="CLAUDE.md edited outside the app">
+              edited
+            </span>
+          )}
+        </div>
+        <div className="mode-switch" role="tablist">
+          <button
+            role="tab"
+            aria-selected={mode === "global"}
+            className={mode === "global" ? "on" : ""}
+            onClick={() => setMode("global")}
+          >
+            Global
+          </button>
+          <button
+            role="tab"
+            aria-selected={mode === "memory"}
+            className={mode === "memory" ? "on" : ""}
+            onClick={() => setMode("memory")}
+          >
             Memory
           </button>
-          <button className="ghost" onClick={() => setShowMappings(true)}>
-            Mappings
-          </button>
-          <button className="ghost" onClick={() => setShowHistory(true)}>
-            History
-          </button>
-        </footer>
-      </main>
-    </>
-  );
-}
+        </div>
+      </header>
 
-function ProfileRow(props: {
-  name: string;
-  isActive: boolean;
-  reserved?: boolean;
-  onToggle: () => void;
-  onEdit: () => void;
-  onDuplicate: () => void;
-  onRename?: () => void;
-  onDelete?: () => void;
-}) {
-  return (
-    <li className={props.isActive ? "active" : ""}>
-      <button className="row-main" onClick={props.onToggle}>
-        <span className="dot" />
-        <span className="name">{props.name}</span>
-        {props.reserved && <em className="badge">backup</em>}
-      </button>
-      <div className="row-actions">
-        <button className="icon" title="Edit" onClick={props.onEdit}>
-          ✎
-        </button>
-        <button className="icon" title="Duplicate" onClick={props.onDuplicate}>
-          ⎘
-        </button>
-        {props.onRename && (
-          <button className="icon" title="Rename" onClick={props.onRename}>
-            ⇄
-          </button>
+      {mode === "memory" && (
+        <select
+          className="proj-pick"
+          value={selectedProject ?? ""}
+          onChange={(e) => setSelectedProject(e.target.value || null)}
+        >
+          <option value="">— pick a project —</option>
+          {memoryProjects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+              {p.has_memory_file ? "" : " (no MEMORY.md)"}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {error && <div className="error compact">{error}</div>}
+
+      <ul className="prof-list">
+        {profiles.length === 0 && mode === "memory" && !selectedProject && (
+          <li className="empty">Pick a project above.</li>
         )}
-        {props.onDelete && (
-          <button
-            className="icon danger"
-            title="Delete"
-            onClick={props.onDelete}
+        {profiles.length === 0 && (mode === "global" || selectedProject) && (
+          <li className="empty">No profile files found.</li>
+        )}
+        {profiles.map((p) => (
+          <li
+            key={p.name}
+            className={
+              (p.is_active ? "active " : "") + (busy === p.name ? "busy" : "")
+            }
+            onClick={() => toggle(p.name)}
+            role="button"
           >
-            🗑
-          </button>
-        )}
-      </div>
-    </li>
+            <span className="dot" />
+            <span className="name">{p.name}</span>
+            {p.name === "origin" && <em className="hint">backup</em>}
+          </li>
+        ))}
+      </ul>
+
+      <footer className="pop-foot">
+        <span className="caption">
+          Edit <code>~/.claude/{mode === "global" ? "CLAUDE.md.*" : "projects/…/memory/MEMORY.md.*"}</code> in your editor.
+        </span>
+      </footer>
+    </main>
   );
 }
 

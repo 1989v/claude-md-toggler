@@ -70,6 +70,7 @@ pub fn run() {
     });
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_positioner::init())
         .manage(AppState {
             store: Mutex::new(store),
             engine: Mutex::new(engine),
