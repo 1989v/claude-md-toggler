@@ -1,15 +1,34 @@
+/* ============================================================
+   Claude.md Toggler — muxbar-style popover skin
+
+   - macOS native vibrancy is applied at the window level via
+     window-vibrancy (HudWindow + Active), so the webview body
+     must stay transparent for the blur to render through.
+   - Color tokens lean on translucent whites/blacks so the same
+     stylesheet reads cleanly over light *and* dark menu bars.
+   - SF Pro Text via `-apple-system`; fallbacks for non-macOS.
+   ============================================================ */
+
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family:
+    -apple-system, "SF Pro Text", BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
   font-size: 13px;
-  color: #e5e7eb;
+  letter-spacing: -0.01em;
+  color: #f3f4f6;
+  /* Vibrancy underneath means we want WebKit's text rendering to look
+     correct even when the background is being blurred behind us. */
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 * {
   box-sizing: border-box;
 }
 
-body,
 html,
+body,
 #root {
   margin: 0;
   padding: 0;
@@ -17,120 +36,161 @@ html,
   background: transparent;
 }
 
+/* When vibrancy isn't available (Linux / Windows), at least fall back
+   to a solid panel so the popover still reads as a window. */
+@supports not (-webkit-backdrop-filter: blur(0px)) {
+  html {
+    background: #1c1d22;
+  }
+}
+
 /* ============================================================
-   Popover container — sized to match the tauri.conf window
+   Popover shell
    ============================================================ */
 
 .pop {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px 12px;
-  background: rgba(15, 17, 22, 0.97);
+  padding: 8px 8px 6px;
+  gap: 8px;
+  /* A whisper of tint over the vibrancy: enough contrast for text
+     without losing the blurred wallpaper effect entirely. */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
+    rgba(20, 22, 27, 0.32);
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35);
-  -webkit-user-select: none;
-  user-select: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-/* Header */
+/* ============================================================
+   Header
+   ============================================================ */
 
 .pop-head {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.pop-head .title {
+.title-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
-  color: #d1d5db;
 }
 
-.pop-head .title strong {
-  color: #f9fafb;
+.title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.active-name {
+  font-size: 13px;
   font-weight: 600;
+  color: rgba(255, 255, 255, 0.96);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dot-active {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: #34d399;
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+  flex-shrink: 0;
 }
 
 .badge-edit {
-  background: #422006;
-  color: #fbbf24;
-  border: 1px solid #92400e;
-  font-size: 10px;
+  background: rgba(251, 191, 36, 0.16);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  font-size: 9px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   padding: 1px 6px;
   border-radius: 999px;
-  margin-left: auto;
 }
 
-/* Mode switch (segmented control) */
+/* Segmented control */
 
 .mode-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  background: #11161d;
-  border: 1px solid #1f2937;
+  background: rgba(255, 255, 255, 0.06);
   border-radius: 7px;
   padding: 2px;
   gap: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .mode-switch button {
   background: transparent;
   border: none;
-  color: #9ca3af;
+  color: rgba(255, 255, 255, 0.6);
   font: inherit;
   font-size: 12px;
-  padding: 5px 8px;
+  font-weight: 500;
+  padding: 4px 8px;
   border-radius: 5px;
   cursor: pointer;
+  transition: background 0.12s, color 0.12s;
 }
 
 .mode-switch button:hover {
-  color: #e5e7eb;
+  color: rgba(255, 255, 255, 0.9);
 }
 
 .mode-switch button.on {
-  background: #1e40af;
+  background: rgba(255, 255, 255, 0.12);
   color: white;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
 }
 
-/* Project picker (memory mode) */
+/* Project dropdown */
 
 .proj-pick {
-  background: #11161d;
-  border: 1px solid #1f2937;
-  color: #e5e7eb;
+  appearance: none;
+  -webkit-appearance: none;
+  background:
+    linear-gradient(45deg, transparent 50%, rgba(255, 255, 255, 0.5) 50%) no-repeat,
+    linear-gradient(135deg, rgba(255, 255, 255, 0.5) 50%, transparent 50%) no-repeat,
+    rgba(255, 255, 255, 0.06);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-size:
+    4px 4px,
+    4px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
   border-radius: 6px;
-  padding: 6px 8px;
+  padding: 5px 24px 5px 10px;
   font: inherit;
   font-size: 12px;
+  cursor: pointer;
 }
 
 .proj-pick:focus {
   outline: none;
-  border-color: #1e40af;
+  border-color: rgba(99, 159, 255, 0.55);
 }
 
-/* Error band */
+/* ============================================================
+   Error band
+   ============================================================ */
 
 .error.compact {
-  background: #3f1d1d;
-  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.14);
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.35);
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 11px;
@@ -138,7 +198,9 @@ html,
   word-break: break-word;
 }
 
-/* Profile list */
+/* ============================================================
+   Profile list — muxbar-style dense rows
+   ============================================================ */
 
 .prof-list {
   list-style: none;
@@ -146,58 +208,98 @@ html,
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   flex: 1;
   overflow-y: auto;
 }
 
+.prof-list::-webkit-scrollbar {
+  width: 6px;
+}
+.prof-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+
 .prof-list li {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  align-items: stretch;
   border-radius: 6px;
-  cursor: pointer;
-  color: #d1d5db;
-  font-size: 13px;
+  overflow: hidden;
+  transition: background 0.08s;
 }
 
 .prof-list li:hover {
-  background: #1f2937;
-  color: #f9fafb;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .prof-list li.active {
-  background: #1e3a8a;
-  color: white;
+  background: rgba(99, 159, 255, 0.18);
 }
 
 .prof-list li.active:hover {
-  background: #1d4ed8;
+  background: rgba(99, 159, 255, 0.24);
 }
 
 .prof-list li.busy {
-  opacity: 0.5;
-  cursor: progress;
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .prof-list li.empty {
   cursor: default;
-  color: #6b7280;
+  color: rgba(255, 255, 255, 0.4);
   font-style: italic;
-  padding: 12px 10px;
+  padding: 14px 10px;
+  justify-content: center;
 }
 
 .prof-list li.empty:hover {
   background: transparent;
-  color: #6b7280;
+}
+
+.row-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.row-main .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.prof-list li.active .row-main .name {
+  color: white;
+  font-weight: 500;
+}
+
+.row-main .hint {
+  font-size: 9px;
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.35);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .prof-list .dot {
-  width: 7px;
-  height: 7px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: #374151;
+  background: rgba(255, 255, 255, 0.2);
   flex-shrink: 0;
 }
 
@@ -205,44 +307,292 @@ html,
   background: #93c5fd;
 }
 
-.prof-list .name {
+.row-actions {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.prof-list li:hover .row-actions,
+.prof-list li.active .row-actions {
+  opacity: 1;
+}
+
+/* ============================================================
+   Icon buttons (✎ ⊖ +)
+   ============================================================ */
+
+.ico-btn {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font: inherit;
+  font-size: 13px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.08s, color 0.08s;
+}
+
+.ico-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.ico-btn.danger:hover {
+  background: rgba(248, 113, 113, 0.2);
+  color: #fca5a5;
+}
+
+/* The "+ New profile" icon in the header is a square plus on a quiet
+   background that pops just enough to be findable without competing
+   with the active-profile label. */
+.title-row > .ico-btn {
+  font-size: 16px;
+  font-weight: 300;
+}
+
+/* ============================================================
+   Footer
+   ============================================================ */
+
+.pop-foot {
+  padding: 4px 6px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pop-foot .caption {
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  letter-spacing: -0.01em;
+}
+
+/* ============================================================
+   Editor mode
+   ============================================================ */
+
+.pop.editor-mode {
+  padding-top: 6px;
+}
+
+.ed-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ed-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.prof-list .hint {
-  font-size: 10px;
-  font-style: normal;
-  color: #6b7280;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.back-btn {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 18px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  cursor: pointer;
+  padding-bottom: 2px;
 }
 
-.prof-list li.active .hint {
-  color: rgba(255, 255, 255, 0.6);
+.back-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
 }
 
-/* Footer caption */
+.name-input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.96);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+}
 
-.pop-foot {
+.name-input:focus {
+  outline: none;
+  border-color: rgba(99, 159, 255, 0.55);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.content-area {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.92);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: none;
+  min-height: 0;
+}
+
+.content-area:focus {
+  outline: none;
+  border-color: rgba(99, 159, 255, 0.4);
+}
+
+.content-area[readonly] {
+  opacity: 0.85;
+}
+
+.ed-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.pop-foot .caption {
-  font-size: 10px;
-  color: #6b7280;
-  line-height: 1.4;
-}
-
-.pop-foot code {
-  background: #11161d;
-  padding: 1px 4px;
-  border-radius: 3px;
+.ed-foot .caption {
   font-family:
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 10px;
-  color: #9ca3af;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.ed-foot .actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.ed-foot button {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ed-foot button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.ed-foot button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ed-foot button.ghost {
+  background: transparent;
+}
+
+.ed-foot button.ghost:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ed-foot button.primary {
+  background: rgba(99, 159, 255, 0.85);
+  border-color: rgba(99, 159, 255, 0.6);
+  color: white;
+  font-weight: 500;
+}
+
+.ed-foot button.primary:hover {
+  background: rgb(99, 159, 255);
+}
+
+/* ============================================================
+   Light-menubar fallback — invert luminance tokens when the OS
+   reports light mode. Keeps text readable when vibrancy is
+   bright (e.g. midday wallpaper or system light theme).
+   ============================================================ */
+
+@media (prefers-color-scheme: light) {
+  .pop {
+    background:
+      linear-gradient(180deg, rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0)),
+      rgba(255, 255, 255, 0.55);
+    border-color: rgba(0, 0, 0, 0.08);
+    color: #111827;
+  }
+
+  .pop-head,
+  .pop-foot,
+  .ed-head,
+  .ed-foot {
+    border-color: rgba(0, 0, 0, 0.07);
+  }
+
+  .active-name,
+  .row-main .name,
+  .ed-head h2 {
+    color: rgba(0, 0, 0, 0.86);
+  }
+
+  .row-main .hint,
+  .pop-foot .caption,
+  .ed-foot .caption {
+    color: rgba(0, 0, 0, 0.4);
+  }
+
+  .mode-switch {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: rgba(0, 0, 0, 0.04);
+  }
+
+  .mode-switch button {
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  .mode-switch button.on {
+    background: white;
+    color: rgba(0, 0, 0, 0.85);
+  }
+
+  .prof-list li:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  .ico-btn {
+    color: rgba(0, 0, 0, 0.45);
+  }
+
+  .ico-btn:hover {
+    background: rgba(0, 0, 0, 0.08);
+    color: rgba(0, 0, 0, 0.85);
+  }
+
+  .content-area {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(0, 0, 0, 0.08);
+    color: rgba(0, 0, 0, 0.86);
+  }
+
+  .name-input {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(0, 0, 0, 0.08);
+    color: rgba(0, 0, 0, 0.86);
+  }
 }

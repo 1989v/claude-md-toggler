@@ -100,6 +100,22 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("[watcher] start failed: {}", e),
             }
+            // Apply native vibrancy under the webview so the popover blurs the
+            // wallpaper / windows underneath, matching the muxbar / standard
+            // NSPopover look. The webview body must keep a transparent
+            // background for this effect to show through.
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = apply_vibrancy(
+                        &win,
+                        NSVisualEffectMaterial::HudWindow,
+                        Some(NSVisualEffectState::Active),
+                        Some(12.0),
+                    );
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

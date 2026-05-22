@@ -15,9 +15,9 @@
       {
         "label": "main",
         "title": "Claude.md Toggler",
-        "width": 320,
-        "height": 460,
-        "minWidth": 320,
+        "width": 360,
+        "height": 500,
+        "minWidth": 360,
         "minHeight": 360,
         "resizable": false,
         "decorations": false,
