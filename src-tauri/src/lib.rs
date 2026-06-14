@@ -23,6 +23,13 @@ pub struct AppState {
     /// baseline tracks profile-file edits made through the editor UI as well
     /// as toggle operations.
     pub last_active: Mutex<Option<String>>,
+    /// True when the active `CLAUDE.md` is a *composed* file (base + domain /
+    /// awareness modifier regions, v0.3) rather than a flat profile. Drift
+    /// detection compares the active file against `CLAUDE.md.composed` instead
+    /// of the flat `CLAUDE.md.{last_active}` when this is set. Without this
+    /// branch a composed active file matches no flat profile and would report
+    /// permanent false drift.
+    pub active_is_composed: Mutex<bool>,
     /// Persistent append-only log of toggle/drift-resolution actions.
     pub history: Mutex<HistoryStore>,
     /// Persistent directory → profile rules. Shares the same SQLite file as
@@ -75,6 +82,7 @@ pub fn run() {
             store: Mutex::new(store),
             engine: Mutex::new(engine),
             last_active: Mutex::new(initial_active),
+            active_is_composed: Mutex::new(false),
             history: Mutex::new(history),
             mappings: Mutex::new(mappings),
         })
@@ -158,5 +166,16 @@ pub fn run() {
 pub(crate) fn record_active(state: &AppState, name: &str) {
     if let Ok(mut guard) = state.last_active.lock() {
         *guard = Some(name.to_string());
+    }
+}
+
+/// Record whether the active target is currently a composed file. Must be set
+/// alongside `record_active` so `check_drift` compares against the right
+/// baseline: the `CLAUDE.md.composed` file when composed, the flat profile
+/// otherwise. A plain flat toggle sets this to `false`; a doctree/awareness
+/// compose sets it to `true`.
+pub(crate) fn set_composed(state: &AppState, composed: bool) {
+    if let Ok(mut guard) = state.active_is_composed.lock() {
+        *guard = composed;
     }
 }

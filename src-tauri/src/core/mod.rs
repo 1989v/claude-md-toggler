@@ -1,3 +1,4 @@
+pub mod composer;
 pub mod drift;
 pub mod history;
 pub mod mappings;

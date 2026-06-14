@@ -6,8 +6,8 @@ use crate::core::drift::{detect as detect_drift, DriftInfo};
 use crate::core::history::{target_for_memory, Action, HistoryEntry, TARGET_GLOBAL};
 use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
-use crate::core::profile_store::ProfileInfo;
-use crate::{default_claude_dir, record_active, tray, AppState};
+use crate::core::profile_store::{ProfileInfo, COMPOSED_NAME};
+use crate::{default_claude_dir, record_active, set_composed, tray, AppState};
 
 /// Best-effort history write — never fails the parent command. We log the
 /// error to stderr and move on, because losing a history row is strictly less
@@ -74,6 +74,9 @@ pub fn toggle_profile(
     }
     apply_result?;
     record_active(&state, &name);
+    // A flat toggle replaces the whole active file with a single profile — the
+    // active file is no longer composed.
+    set_composed(&state, false);
     tray::refresh(&app).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -179,10 +182,22 @@ pub fn check_drift(state: State<'_, AppState>) -> Result<Option<DriftInfo>, Stri
     if name == "modified" || name == "none" {
         return Ok(None);
     }
+    let is_composed = state
+        .active_is_composed
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(false);
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let target = store.target_path();
-    let profile_path = store.profile_path(&name);
-    Ok(detect_drift(&name, &target, &profile_path))
+    // When the active file is composed (base + modifier regions), it matches no
+    // flat profile — compare it against the composed baseline instead, otherwise
+    // every FileWatcher tick would report false drift.
+    let expected_path = if is_composed {
+        store.profile_path(COMPOSED_NAME)
+    } else {
+        store.profile_path(&name)
+    };
+    Ok(detect_drift(&name, &target, &expected_path))
 }
 
 /// Resolution: write the current `CLAUDE.md` bytes back into the profile file
@@ -292,6 +307,9 @@ pub fn resolve_drift_discard(
         ),
     }
     result?;
+    // Discard re-applies the flat last-active profile, so the active file is no
+    // longer composed.
+    set_composed(&state, false);
     tray::refresh(&app).map_err(|e| e.to_string())?;
     Ok(())
 }

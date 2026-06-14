@@ -6,8 +6,16 @@ use serde::Serialize;
 use thiserror::Error;
 
 /// Reserved suffixes that must never be used as user-facing profile names.
-/// `origin` is the backup of the default state; `tmp` is the in-flight swap prefix.
-pub const RESERVED_NAMES: &[&str] = &["origin", "tmp"];
+/// `origin` is the backup of the default state; `tmp` is the in-flight swap
+/// prefix; `composed` is the v0.3 baseline holding the last composed active
+/// bytes (base + domain/awareness modifier regions) used for drift comparison.
+pub const RESERVED_NAMES: &[&str] = &["origin", "tmp", COMPOSED_NAME];
+
+/// Reserved profile suffix for the composed-active baseline file
+/// (`{target}.composed`). Written by `core::composer`, never user-facing:
+/// excluded from `list()`/`detect_active()` and rejected by `validate_name`.
+/// It is per-machine and must never be synced to a remote repo.
+pub const COMPOSED_NAME: &str = "composed";
 
 const MAX_NAME_LEN: usize = 64;
 
@@ -120,6 +128,11 @@ impl ProfileStore {
             };
             // Skip the in-flight swap files used by the toggle engine.
             if suffix.starts_with("tmp.") {
+                continue;
+            }
+            // Skip the composed-active baseline — it is an internal drift
+            // baseline, not a user-selectable profile.
+            if suffix == COMPOSED_NAME {
                 continue;
             }
 
@@ -240,8 +253,10 @@ impl ProfileStore {
 }
 
 /// Looser validation that permits "origin" and any name passing `validate_name`,
-/// but always blocks path separators and parent-traversal sequences.
-fn validate_lookup(name: &str) -> Result<&str, ProfileError> {
+/// but always blocks path separators and parent-traversal sequences. Public so
+/// the v0.3 doctree layer can re-validate repo-sourced domain ids (which become
+/// filesystem paths and `@import` lines) against traversal before use.
+pub fn validate_lookup(name: &str) -> Result<&str, ProfileError> {
     if name.is_empty() {
         return Err(ProfileError::EmptyName);
     }
@@ -357,6 +372,42 @@ mod tests {
             validate_name("tmp.12345"),
             Err(ProfileError::ReservedName(_))
         ));
+        assert!(matches!(
+            validate_name("composed"),
+            Err(ProfileError::ReservedName(_))
+        ));
+    }
+
+    #[test]
+    fn list_skips_composed_baseline_file() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "CLAUDE.md", "active");
+        write(dir.path(), "CLAUDE.md.origin", "default");
+        write(dir.path(), "CLAUDE.md.quality-first", "quality");
+        // The composed baseline must never surface as a user profile.
+        write(dir.path(), "CLAUDE.md.composed", "active");
+
+        let store = ProfileStore::new(dir.path().to_path_buf(), "CLAUDE.md");
+        let names: Vec<_> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, vec!["origin", "quality-first"]);
+    }
+
+    #[test]
+    fn validate_lookup_blocks_traversal_but_allows_valid_ids() {
+        assert!(validate_lookup("kubernetes").is_ok());
+        assert!(validate_lookup("origin").is_ok());
+        for bad in ["../etc", "a/b", "a\\b", "..", "foo/../bar"] {
+            assert!(
+                validate_lookup(bad).is_err(),
+                "expected '{}' to be rejected by validate_lookup",
+                bad
+            );
+        }
     }
 
     #[test]

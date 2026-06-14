@@ -67,6 +67,20 @@ pub fn default_lock_path(target: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".toggler.lock"))
 }
 
+/// Resolve the long-running git-operation lock path next to the target file.
+///
+/// v0.3 git work (clone/fetch/checkout/push/materialize) can take many seconds
+/// and MUST NOT be serialized behind the sub-second toggle swap lock. This
+/// separate lock keeps a slow fetch from blocking a fast local toggle. The
+/// invariant is one-directional: never acquire the swap lock (`.toggler.lock`)
+/// while holding this git lock, to avoid a lock-ordering deadlock.
+pub fn default_git_lock_path(target: &Path) -> PathBuf {
+    target
+        .parent()
+        .map(|p| p.join(".toggler-git.lock"))
+        .unwrap_or_else(|| PathBuf::from(".toggler-git.lock"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
