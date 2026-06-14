@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS doctree_selection (
     id          TEXT PRIMARY KEY,
     applied_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_doctree_selection (
+    project_id  TEXT NOT NULL,
+    doctree_id  TEXT NOT NULL,
+    applied_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, doctree_id)
+);
 "#;
 
 /// Result of materializing one domain, including any non-fatal warnings (e.g. an
@@ -122,6 +128,41 @@ impl DoctreeStore {
         self.conn.execute("DELETE FROM doctree_selection", [])?;
         Ok(())
     }
+
+    /// Per-project selection (v0.4). Keyed by project id so each project binds
+    /// its own domain set without disturbing the global selection or other
+    /// projects.
+    pub fn list_selected_for(&self, project_id: &str) -> Result<Vec<String>, DoctreeError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doctree_id FROM project_doctree_selection
+             WHERE project_id = ?1 ORDER BY doctree_id ASC",
+        )?;
+        let rows = stmt.query_map([project_id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Replace a SINGLE project's selection (scoped `DELETE WHERE project_id`),
+    /// never the global DELETE-all — so binding one project leaves the others
+    /// intact.
+    pub fn set_selected_for(&self, project_id: &str, ids: &[String]) -> Result<(), DoctreeError> {
+        let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.conn.execute(
+            "DELETE FROM project_doctree_selection WHERE project_id = ?1",
+            params![project_id],
+        )?;
+        for id in ids {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO project_doctree_selection
+                    (project_id, doctree_id, applied_at) VALUES (?1, ?2, ?3)",
+                params![project_id, id, ts],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Validate a repo-sourced domain id before it is ever turned into a path or an
@@ -137,20 +178,50 @@ pub fn domain_dest(claude_dir: &Path, id: &str) -> PathBuf {
     claude_dir.join(DOMAINS_DIR_NAME).join(id)
 }
 
-/// The `@import` line a materialized domain contributes to the composed file.
+/// The `@import` line a globally-materialized domain contributes (relative to
+/// `~/.claude`, where the global `CLAUDE.md` lives).
 pub fn import_line(id: &str) -> String {
-    format!("@{}/{}/{}", DOMAINS_DIR_NAME, id, INDEX_NAME)
+    import_line_for(id, "")
 }
 
-/// Copy one domain doc-tree from the repo mirror into `~/.claude/domains/{id}`,
-/// validating the id and the presence of INDEX.md, and walking INDEX.md's direct
-/// (1-hop) `@import` references to warn about missing targets. Returns the import
-/// line + warnings. The destination is replaced wholesale so removing files in the
-/// repo propagates.
+/// The `@import` line for an arbitrary composition target, where `rel_prefix` is
+/// the path from the importing file's directory to the domains root. Claude Code
+/// resolves `@import` relative to the file containing it, so a per-project
+/// `MEMORY.md` in `.../memory/` pointing at `.../domains/{id}/` uses `rel_prefix=".."`
+/// → `@../domains/{id}/INDEX.md`. The global `CLAUDE.md` sits beside `domains/`
+/// → empty prefix → `@domains/{id}/INDEX.md`.
+pub fn import_line_for(id: &str, rel_prefix: &str) -> String {
+    if rel_prefix.is_empty() {
+        format!("@{}/{}/{}", DOMAINS_DIR_NAME, id, INDEX_NAME)
+    } else {
+        format!("@{}/{}/{}/{}", rel_prefix, DOMAINS_DIR_NAME, id, INDEX_NAME)
+    }
+}
+
+/// Copy one domain doc-tree from the repo mirror into the GLOBAL
+/// `~/.claude/domains/{id}` (v0.3 behavior). Delegates to `materialize_domain_into`.
 pub fn materialize_domain(
     doctrees_dir: &Path,
     claude_dir: &Path,
     id: &str,
+) -> Result<DomainApply, DoctreeError> {
+    materialize_domain_into(doctrees_dir, &claude_dir.join(DOMAINS_DIR_NAME), id, "")
+}
+
+/// Copy one domain doc-tree from the repo mirror into `domains_root/{id}`,
+/// validating the id and INDEX.md presence and walking INDEX.md's direct (1-hop)
+/// `@import` references to warn about missing targets. `rel_prefix` shapes the
+/// returned `@import` line for the composition target. The destination is
+/// replaced wholesale so removing files in the repo propagates.
+///
+/// Note: this does plain filesystem mutation — the per-project caller must hold
+/// that project's swap lock around it so a concurrent apply can't torn-read the
+/// tree mid-copy.
+pub fn materialize_domain_into(
+    doctrees_dir: &Path,
+    domains_root: &Path,
+    id: &str,
+    rel_prefix: &str,
 ) -> Result<DomainApply, DoctreeError> {
     validate_domain_id(id)?;
     let src = doctrees_dir.join(id);
@@ -164,7 +235,7 @@ pub fn materialize_domain(
 
     let warnings = check_imports(&src, &index)?;
 
-    let dest = domain_dest(claude_dir, id);
+    let dest = domains_root.join(id);
     if dest.exists() {
         fs::remove_dir_all(&dest)?;
     }
@@ -172,20 +243,25 @@ pub fn materialize_domain(
 
     Ok(DomainApply {
         id: id.to_string(),
-        import_line: import_line(id),
+        import_line: import_line_for(id, rel_prefix),
         warnings,
     })
 }
 
-/// Remove `~/.claude/domains/{id}` directories whose id is not in `keep`.
-/// Returns the ids that were garbage-collected.
+/// Remove GLOBAL `~/.claude/domains/{id}` directories whose id is not in `keep`.
 pub fn gc_orphans(claude_dir: &Path, keep: &[String]) -> Result<Vec<String>, DoctreeError> {
-    let domains_root = claude_dir.join(DOMAINS_DIR_NAME);
+    gc_orphans_in(&claude_dir.join(DOMAINS_DIR_NAME), keep)
+}
+
+/// Remove `{domains_root}/{id}` directories whose id is not in `keep`. Returns
+/// the ids that were garbage-collected. Operates ONLY within `domains_root`, so a
+/// per-project gc never touches another project's (or the global) domains.
+pub fn gc_orphans_in(domains_root: &Path, keep: &[String]) -> Result<Vec<String>, DoctreeError> {
     if !domains_root.is_dir() {
         return Ok(Vec::new());
     }
     let mut removed = Vec::new();
-    for entry in fs::read_dir(&domains_root)? {
+    for entry in fs::read_dir(domains_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -198,6 +274,16 @@ pub fn gc_orphans(claude_dir: &Path, keep: &[String]) -> Result<Vec<String>, Doc
     }
     removed.sort();
     Ok(removed)
+}
+
+/// Drop selection ids whose doctree no longer exists in the mirror (deleted from
+/// the repo), so a dangling per-project selection can't wedge re-application with
+/// a NotFound error. Returns the surviving ids (sorted, order-stable input kept).
+pub fn prune_missing(doctrees_dir: &Path, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| doctrees_dir.join(id).join(INDEX_NAME).is_file())
+        .cloned()
+        .collect()
 }
 
 /// Scan INDEX.md for direct `@import` lines and return warnings for any whose
@@ -369,5 +455,70 @@ mod tests {
         // replace, not append
         store.set_selected(&["spring".into()]).unwrap();
         assert_eq!(store.list_selected().unwrap(), vec!["spring".to_string()]);
+    }
+
+    // --- v0.4 per-project ---------------------------------------------------
+
+    #[test]
+    fn import_line_for_global_and_project_relative() {
+        assert_eq!(import_line_for("k8s", ""), "@domains/k8s/INDEX.md");
+        assert_eq!(import_line_for("k8s", ".."), "@../domains/k8s/INDEX.md");
+    }
+
+    #[test]
+    fn materialize_into_uses_project_root_and_relative_import() {
+        let dir = tempdir().unwrap();
+        let doctrees = dir.path().join("doctrees");
+        make_domain(&doctrees, "kubernetes", "# k8s\n");
+        let proj_domains = dir.path().join("projects/p1/domains");
+
+        let a = materialize_domain_into(&doctrees, &proj_domains, "kubernetes", "..").unwrap();
+        assert_eq!(a.import_line, "@../domains/kubernetes/INDEX.md");
+        assert!(proj_domains.join("kubernetes/INDEX.md").exists());
+    }
+
+    #[test]
+    fn gc_in_isolates_to_its_root() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("a/domains");
+        let root_b = dir.path().join("b/domains");
+        for r in [&root_a, &root_b] {
+            fs::create_dir_all(r.join("kubernetes")).unwrap();
+            fs::create_dir_all(r.join("trading")).unwrap();
+        }
+        let removed = gc_orphans_in(&root_a, &["kubernetes".to_string()]).unwrap();
+        assert_eq!(removed, vec!["trading".to_string()]);
+        assert!(root_b.join("trading").exists(), "other root untouched");
+    }
+
+    #[test]
+    fn prune_missing_drops_absent_doctrees() {
+        let dir = tempdir().unwrap();
+        let doctrees = dir.path().join("doctrees");
+        make_domain(&doctrees, "kubernetes", "x");
+        let kept = prune_missing(&doctrees, &["kubernetes".into(), "deleted".into()]);
+        assert_eq!(kept, vec!["kubernetes".to_string()]);
+    }
+
+    #[test]
+    fn project_selection_is_scoped_per_project() {
+        let store = DoctreeStore::in_memory().unwrap();
+        store
+            .set_selected_for("projA", &["kubernetes".into(), "trading".into()])
+            .unwrap();
+        store.set_selected_for("projB", &["spring".into()]).unwrap();
+        assert_eq!(
+            store.list_selected_for("projA").unwrap(),
+            vec!["kubernetes".to_string(), "trading".to_string()]
+        );
+        assert_eq!(
+            store.list_selected_for("projB").unwrap(),
+            vec!["spring".to_string()]
+        );
+        // re-setting A must not disturb B or the global selection.
+        store.set_selected_for("projA", &["redis".into()]).unwrap();
+        assert_eq!(store.list_selected_for("projA").unwrap(), vec!["redis".to_string()]);
+        assert_eq!(store.list_selected_for("projB").unwrap(), vec!["spring".to_string()]);
+        assert!(store.list_selected().unwrap().is_empty());
     }
 }
