@@ -74,6 +74,17 @@ pub fn memory_dir_for(claude_dir: &Path, project_id: &str) -> PathBuf {
         .join("memory")
 }
 
+/// The per-project domains root (`{claude_dir}/projects/{id}/domains/`), a
+/// sibling of the memory dir. v0.4 materializes a project's bound doctrees here
+/// so the `@../domains/{id}/INDEX.md` import in `MEMORY.md` (which lives in the
+/// adjacent `memory/` dir) resolves relative to the importing file.
+pub fn domains_dir_for(claude_dir: &Path, project_id: &str) -> PathBuf {
+    claude_dir
+        .join("projects")
+        .join(project_id)
+        .join("domains")
+}
+
 /// `ProfileStore` aimed at the project's `MEMORY.md`.
 pub fn store_for(claude_dir: &Path, project_id: &str) -> ProfileStore {
     ProfileStore::new(memory_dir_for(claude_dir, project_id), MEMORY_TARGET_NAME)

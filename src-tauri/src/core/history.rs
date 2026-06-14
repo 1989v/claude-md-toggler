@@ -208,6 +208,12 @@ pub fn target_for_memory(project_id: &str) -> String {
     format!("memory:{}", project_id)
 }
 
+/// Canonical target string for a project's doctree binding (v0.4). Parallel to
+/// `target_for_memory`; distinguishes per-project domain applies in history.
+pub fn target_for_project_doctree(project_id: &str) -> String {
+    format!("doctree:{}", project_id)
+}
+
 /// Default path under `~/.claude/`; co-located with the toggle files so a
 /// dotfiles backup picks it up alongside the profiles.
 pub fn default_db_path(base_dir: &Path) -> PathBuf {

@@ -175,6 +175,24 @@ pub fn compose_and_apply(
     Ok(composed)
 }
 
+/// Same as [`compose_and_apply`] but for a caller that ALREADY holds the engine's
+/// swap lock (per-project apply holds one lock across materialize + gc + apply to
+/// avoid a torn read). Uses `apply_profile_locked` so it does not re-acquire.
+pub fn compose_and_apply_locked(
+    engine: &ToggleEngine,
+    base_body: &str,
+    domain_imports: &[String],
+    awareness_block: Option<&str>,
+) -> Result<String, ComposeError> {
+    ensure_pristine_origin(engine)?;
+
+    let composed = compose(base_body, domain_imports, awareness_block);
+    let composed_path = engine.profile_path(COMPOSED_NAME);
+    fs::write(&composed_path, &composed)?;
+    engine.apply_profile_locked(&composed_path)?;
+    Ok(composed)
+}
+
 /// If no origin backup exists yet, capture one from the *pristine* (block-stripped)
 /// current target. This guards against a fresh-machine sequence where the first
 /// action is a composed apply: `ToggleEngine::ensure_backup` would otherwise

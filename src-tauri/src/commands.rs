@@ -6,7 +6,9 @@ use crate::core::composer;
 use crate::core::doctree::{self, DomainApply};
 use crate::core::drift::{detect as detect_drift, DriftInfo};
 use crate::core::git_sync::{self, MaterializeEntry, MaterializeOutcome};
-use crate::core::history::{target_for_memory, Action, HistoryEntry, TARGET_GLOBAL};
+use crate::core::history::{
+    target_for_memory, target_for_project_doctree, Action, HistoryEntry, TARGET_GLOBAL,
+};
 use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
 use crate::core::profile_store::{ProfileInfo, COMPOSED_NAME};
@@ -356,12 +358,43 @@ pub fn memory_toggle_profile(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let engine = memory::engine_for(&default_claude_dir(), &project_id);
+    let claude = default_claude_dir();
+    let selection = {
+        let dstore = state.doctree.lock().map_err(|e| e.to_string())?;
+        dstore
+            .list_selected_for(&project_id)
+            .map_err(|e| e.to_string())?
+    };
+    let engine = memory::engine_for(&claude, &project_id);
     // Best-effort backup creation before the first toggle.
     if let Err(e) = engine.ensure_backup() {
         return Err(e.to_string());
     }
-    let result = engine.apply_named(&name).map_err(|e| e.to_string());
+    let result: Result<(), String> = if selection.is_empty() {
+        // No domains bound — flat toggle (v0.1 behavior).
+        engine.apply_named(&name).map_err(|e| e.to_string())
+    } else {
+        // Domains bound to this project — compose the toggled-to base profile
+        // with the preserved domain imports so the toggle does not silently drop
+        // the binding (single MEMORY.md slot would otherwise clobber it).
+        let store = memory::store_for(&claude, &project_id);
+        let doctrees_dir = state.git.doctrees_dir();
+        let domains_root = memory::domains_dir_for(&claude, &project_id);
+        let kept = doctree::prune_missing(&doctrees_dir, &selection);
+        let _guard =
+            session_lock::acquire_blocking(engine.lock_path()).map_err(|e| e.to_string())?;
+        let mut imports = Vec::new();
+        for id in &kept {
+            if let Ok(a) = doctree::materialize_domain_into(&doctrees_dir, &domains_root, id, "..") {
+                imports.push(a.import_line);
+            }
+        }
+        let _ = doctree::gc_orphans_in(&domains_root, &kept);
+        let base_body = store.read(&name).unwrap_or_default();
+        composer::compose_and_apply_locked(&engine, &base_body, &imports, None)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
     let target = target_for_memory(&project_id);
     match &result {
         Ok(()) => record_history(&state, Action::Toggle, None, Some(&name), &target, Ok(())),
@@ -536,6 +569,21 @@ pub fn apply_mapping_for(
             ),
         }
         apply_result?;
+        Ok(ApplyMappingResult {
+            matched: Some(mapping),
+        })
+    } else if let Some(project_id) = mapping.target.strip_prefix("doctree:") {
+        // Per-project domain binding: the domain ids live in
+        // project_doctree_selection (not the mapping row), composed into the
+        // project's MEMORY.md — never the global CLAUDE.md.
+        let project_id = project_id.to_string();
+        let ids = {
+            let dstore = state.doctree.lock().map_err(|e| e.to_string())?;
+            dstore
+                .list_selected_for(&project_id)
+                .map_err(|e| e.to_string())?
+        };
+        apply_project_doctrees(project_id, ids, state)?;
         Ok(ApplyMappingResult {
             matched: Some(mapping),
         })
@@ -976,6 +1024,128 @@ pub fn create_doctree(
         pushed,
         push_error,
     })
+}
+
+// --- v0.4 per-project domain binding (feature B) --------------------------
+
+#[derive(serde::Serialize)]
+pub struct ApplyProjectDoctreesResult {
+    pub applied: Vec<DomainApply>,
+    pub composed: bool,
+    /// Ids dropped because their doctree no longer exists in the repo.
+    pub pruned: Vec<String>,
+}
+
+/// The base body for a per-project compose: the project's active MEMORY profile
+/// bytes when there is one, else the stripped current MEMORY.md (recovers the
+/// base from an already-composed file, or empty for a fresh project).
+fn memory_base_body(
+    store: &crate::core::profile_store::ProfileStore,
+    engine: &crate::core::toggle_engine::ToggleEngine,
+) -> String {
+    if let Ok(active) = store.detect_active() {
+        if active != "modified" && active != "none" {
+            if let Ok(content) = store.read(&active) {
+                return content;
+            }
+        }
+    }
+    std::fs::read_to_string(engine.target())
+        .map(|c| composer::strip_blocks(&c))
+        .unwrap_or_default()
+}
+
+/// Bind an additive domain selection to ONE project, composing it into that
+/// project's `~/.claude/projects/{id}/memory/MEMORY.md` — never the global
+/// CLAUDE.md. The per-project swap lock is held across materialize + gc +
+/// compose+apply so a concurrent apply of the same project can't torn-read the
+/// domains root. Global slots (active_is_composed/last_active/engine) are untouched.
+#[tauri::command]
+pub fn apply_project_doctrees(
+    project_id: String,
+    ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<ApplyProjectDoctreesResult, String> {
+    let claude = default_claude_dir();
+    let doctrees_dir = state.git.doctrees_dir();
+    // Drop ids whose doctree was deleted from the repo so a dangling selection
+    // can't wedge re-apply with NotFound.
+    let kept = doctree::prune_missing(&doctrees_dir, &ids);
+    let pruned: Vec<String> = ids.into_iter().filter(|i| !kept.contains(i)).collect();
+
+    let engine = memory::engine_for(&claude, &project_id);
+    let store = memory::store_for(&claude, &project_id);
+    let domains_root = memory::domains_dir_for(&claude, &project_id);
+
+    let mut applied = Vec::new();
+    let mut imports = Vec::new();
+    {
+        let _guard =
+            session_lock::acquire_blocking(engine.lock_path()).map_err(|e| e.to_string())?;
+        for id in &kept {
+            let a = doctree::materialize_domain_into(&doctrees_dir, &domains_root, id, "..")
+                .map_err(|e| e.to_string())?;
+            imports.push(a.import_line.clone());
+            applied.push(a);
+        }
+        doctree::gc_orphans_in(&domains_root, &kept).map_err(|e| e.to_string())?;
+        let base_body = memory_base_body(&store, &engine);
+        composer::compose_and_apply_locked(&engine, &base_body, &imports, None)
+            .map_err(|e| e.to_string())?;
+    }
+
+    {
+        let dstore = state.doctree.lock().map_err(|e| e.to_string())?;
+        dstore
+            .set_selected_for(&project_id, &kept)
+            .map_err(|e| e.to_string())?;
+    }
+    record_history(
+        &state,
+        Action::DoctreeApply,
+        None,
+        Some(&format!("{} domain(s)", kept.len())),
+        &target_for_project_doctree(&project_id),
+        Ok(()),
+    );
+    Ok(ApplyProjectDoctreesResult {
+        applied,
+        composed: !kept.is_empty(),
+        pruned,
+    })
+}
+
+/// The repo's doctrees flagged with whether each is in THIS project's binding.
+#[tauri::command]
+pub fn list_project_doctrees(
+    project_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<DoctreeInfo>, String> {
+    let manifest_path = state.git.manifest_path();
+    let entries = if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+        git_sync::parse_manifest(&text)
+            .map_err(|e| e.to_string())?
+            .doctrees
+    } else {
+        Vec::new()
+    };
+    let selected = {
+        let dstore = state.doctree.lock().map_err(|e| e.to_string())?;
+        dstore
+            .list_selected_for(&project_id)
+            .map_err(|e| e.to_string())?
+    };
+    Ok(entries
+        .into_iter()
+        .map(|d| DoctreeInfo {
+            selected: selected.iter().any(|s| s == &d.id),
+            id: d.id,
+            display: d.display,
+            tags: d.tags,
+            est_tokens: d.est_tokens,
+        })
+        .collect())
 }
 
 /// Apply an additive domain selection: materialize each selected doc-tree into

@@ -650,16 +650,30 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
   const [ntokens, setNtokens] = useState("");
   const [nbody, setNbody] = useState("");
 
+  // Per-project binding (v0.4): when a project is picked, the panel scopes to
+  // that project's selection and composes into its MEMORY.md instead of the
+  // global CLAUDE.md.
+  const [projects, setProjects] = useState<MemoryProject[]>([]);
+  const [projectId, setProjectId] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<MemoryProject[]>("memory_list_projects")
+      .then(setProjects)
+      .catch(() => {});
+  }, []);
+
   const load = useCallback(async () => {
     try {
-      const list = await invoke<DoctreeInfo[]>("list_doctrees");
+      const list = projectId
+        ? await invoke<DoctreeInfo[]>("list_project_doctrees", { projectId })
+        : await invoke<DoctreeInfo[]>("list_doctrees");
       setDoctrees(list);
       setSelected(new Set(list.filter((d) => d.selected).map((d) => d.id)));
       onError(null);
     } catch (e) {
       onError(String(e));
     }
-  }, [onError]);
+  }, [onError, projectId]);
 
   useEffect(() => {
     load();
@@ -677,9 +691,13 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
   async function apply() {
     setBusy(true);
     try {
-      const result = await invoke<ApplyDoctreesResult>("apply_doctrees", {
-        ids: Array.from(selected),
-      });
+      const ids = Array.from(selected);
+      const result = projectId
+        ? await invoke<ApplyDoctreesResult>("apply_project_doctrees", {
+            projectId,
+            ids,
+          })
+        : await invoke<ApplyDoctreesResult>("apply_doctrees", { ids });
       setApplied(result);
       onError(null);
       await load();
@@ -687,6 +705,21 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
       onError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function bindDirectory() {
+    const proj = projects.find((p) => p.id === projectId);
+    if (!proj) return;
+    try {
+      await invoke("add_mapping", {
+        dirPath: proj.label,
+        target: `doctree:${proj.id}`,
+        profileName: proj.id,
+      });
+      onError(null);
+    } catch (e) {
+      onError(String(e));
     }
   }
 
@@ -737,6 +770,27 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
 
   return (
     <div className="domains-panel">
+      <select
+        className="proj-pick"
+        value={projectId ?? ""}
+        onChange={(e) => setProjectId(e.target.value || null)}
+      >
+        <option value="">Global (~/.claude/CLAUDE.md)</option>
+        {projects.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+      {projectId && (
+        <div className="caption tiny">
+          composes into this project's user-level MEMORY.md ·{" "}
+          <button className="linklike" onClick={bindDirectory}>
+            bind directory
+          </button>
+        </div>
+      )}
+
       <div className="doctree-head">
         <button className="ghost" onClick={() => setShowNew((v) => !v)}>
           {showNew ? "Cancel" : "+ New doctree"}
@@ -832,7 +886,7 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
           {applied && (
             <div className="caption tiny">
               {applied.composed
-                ? `composed: base + ${applied.applied.length} domain(s) — applies to new sessions`
+                ? `composed: base + ${applied.applied.length} domain(s) into ${projectId ? "this project's MEMORY.md" : "global CLAUDE.md"} — applies to new sessions`
                 : "reverted to plain base profile"}
               {applied.applied.flatMap((a) => a.warnings).length > 0 && (
                 <span className="warn">

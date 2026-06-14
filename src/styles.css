@@ -819,3 +819,13 @@ body,
   min-height: 80px;
   font-size: 11px;
 }
+
+.linklike {
+  background: none;
+  border: none;
+  color: #6ee7b7;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}

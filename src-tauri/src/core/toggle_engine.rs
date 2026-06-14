@@ -82,12 +82,26 @@ impl ToggleEngine {
     /// the swap so concurrent toggler instances serialize their writes instead
     /// of racing for the same atomic rename.
     pub fn apply_profile(&self, profile_path: &Path) -> Result<(), ToggleError> {
+        let _guard = session_lock::acquire_blocking(&self.lock_path)?;
+        self.apply_profile_locked(profile_path)
+    }
+
+    /// Apply without acquiring the swap lock — for a caller that ALREADY holds
+    /// this engine's lock (e.g. a per-project compose that must hold one lock
+    /// across materialize + gc + apply to avoid a torn read). Do not call
+    /// without holding `lock_path()`.
+    pub fn apply_profile_locked(&self, profile_path: &Path) -> Result<(), ToggleError> {
         if !profile_path.exists() {
             return Err(ToggleError::ProfileNotFound(profile_path.to_path_buf()));
         }
-        let _guard = session_lock::acquire_blocking(&self.lock_path)?;
         self.ensure_backup()?;
         atomic_copy(profile_path, &self.target)
+    }
+
+    /// This engine's advisory swap-lock path, so a caller can hold it across a
+    /// multi-step compose.
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
     }
 
     /// Toggle by profile name. "origin" restores from backup; any other name

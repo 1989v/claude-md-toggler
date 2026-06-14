@@ -221,6 +221,8 @@ pub fn run() {
             commands::read_doctree_index,
             commands::apply_doctrees,
             commands::create_doctree,
+            commands::apply_project_doctrees,
+            commands::list_project_doctrees,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
