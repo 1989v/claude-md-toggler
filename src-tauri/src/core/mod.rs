@@ -1,4 +1,5 @@
 pub mod composer;
+pub mod doctree;
 pub mod drift;
 pub mod git_sync;
 pub mod history;

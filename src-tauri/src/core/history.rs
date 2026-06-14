@@ -49,6 +49,9 @@ pub enum Action {
     DriftApplyToActive,
     DriftApplyToOrigin,
     DriftDiscard,
+    GitPull,
+    GitPush,
+    DoctreeApply,
 }
 
 impl Action {
@@ -58,6 +61,9 @@ impl Action {
             Action::DriftApplyToActive => "drift-apply-to-active",
             Action::DriftApplyToOrigin => "drift-apply-to-origin",
             Action::DriftDiscard => "drift-discard",
+            Action::GitPull => "git-pull",
+            Action::GitPush => "git-push",
+            Action::DoctreeApply => "doctree-apply",
         }
     }
 }

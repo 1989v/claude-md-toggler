@@ -9,9 +9,12 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+use core::doctree::DoctreeStore;
+use core::git_sync::GitSync;
 use core::history::{default_db_path, HistoryStore};
 use core::mappings::MappingsStore;
 use core::profile_store::ProfileStore;
+use core::sync_config::SyncConfigStore;
 use core::toggle_engine::ToggleEngine;
 
 pub struct AppState {
@@ -35,6 +38,13 @@ pub struct AppState {
     /// Persistent directory → profile rules. Shares the same SQLite file as
     /// `history` (different table) so a single backup covers both.
     pub mappings: Mutex<MappingsStore>,
+    /// Linked context-repo configuration (v0.3). Same shared SQLite file.
+    pub sync_config: Mutex<SyncConfigStore>,
+    /// Persisted set of selected domain doc-trees (v0.3). Same shared SQLite file.
+    pub doctree: Mutex<DoctreeStore>,
+    /// Git transport for the linked context repo. Stateless beyond its worktree
+    /// path; long git ops take a separate `.toggler-git.lock` inside the command.
+    pub git: GitSync,
 }
 
 pub(crate) fn default_claude_dir() -> PathBuf {
@@ -75,6 +85,23 @@ pub fn run() {
         );
         MappingsStore::in_memory().expect("in-memory sqlite must always succeed")
     });
+    let sync_config = SyncConfigStore::open(&db_path).unwrap_or_else(|e| {
+        eprintln!(
+            "[sync] failed to open {} — sync config will not persist: {}",
+            db_path.display(),
+            e
+        );
+        SyncConfigStore::in_memory().expect("in-memory sqlite must always succeed")
+    });
+    let doctree = DoctreeStore::open(&db_path).unwrap_or_else(|e| {
+        eprintln!(
+            "[doctree] failed to open {} — selection will not persist: {}",
+            db_path.display(),
+            e
+        );
+        DoctreeStore::in_memory().expect("in-memory sqlite must always succeed")
+    });
+    let git = GitSync::new(&claude_dir);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
@@ -85,6 +112,9 @@ pub fn run() {
             active_is_composed: Mutex::new(false),
             history: Mutex::new(history),
             mappings: Mutex::new(mappings),
+            sync_config: Mutex::new(sync_config),
+            doctree: Mutex::new(doctree),
+            git,
         })
         .setup(move |app| {
             if let Err(e) = seeding::seed_presets(&claude_dir, TARGET_NAME) {
@@ -156,6 +186,16 @@ pub fn run() {
             commands::update_mapping,
             commands::delete_mapping,
             commands::apply_mapping_for,
+            commands::get_sync_status,
+            commands::link_repo,
+            commands::set_repo_pat,
+            commands::fetch_repo,
+            commands::push_repo,
+            commands::set_sync_auto,
+            commands::unlink_repo,
+            commands::list_doctrees,
+            commands::read_doctree_index,
+            commands::apply_doctrees,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

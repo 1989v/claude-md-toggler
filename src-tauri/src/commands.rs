@@ -2,12 +2,16 @@ use std::fs;
 
 use tauri::{AppHandle, State};
 
+use crate::core::composer;
+use crate::core::doctree::{self, DomainApply};
 use crate::core::drift::{detect as detect_drift, DriftInfo};
+use crate::core::git_sync::{self, MaterializeEntry, MaterializeOutcome};
 use crate::core::history::{target_for_memory, Action, HistoryEntry, TARGET_GLOBAL};
 use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
 use crate::core::profile_store::{ProfileInfo, COMPOSED_NAME};
-use crate::{default_claude_dir, record_active, set_composed, tray, AppState};
+use crate::core::session_lock::{self, SessionGuard};
+use crate::{default_claude_dir, record_active, set_composed, tray, AppState, TARGET_NAME};
 
 /// Best-effort history write — never fails the parent command. We log the
 /// error to stderr and move on, because losing a history row is strictly less
@@ -538,4 +542,425 @@ pub fn apply_mapping_for(
     } else {
         Err(format!("unknown mapping target: {}", mapping.target))
     }
+}
+
+// --- v0.3 Connected Context: git sync (21-1) + domain doc-trees (21-2) -----
+
+#[derive(serde::Serialize)]
+pub struct SyncStatus {
+    pub linked: bool,
+    pub remote_url: Option<String>,
+    pub branch: Option<String>,
+    pub last_synced_sha: Option<String>,
+    pub head_sha: Option<String>,
+    pub auto_pull: bool,
+    pub auto_push: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct PullReport {
+    pub entries: Vec<MaterializeEntry>,
+    pub head_sha: String,
+    /// Whether `last_synced_sha` advanced (true only when there were no conflicts).
+    pub advanced: bool,
+    pub conflicts: usize,
+}
+
+#[derive(serde::Serialize)]
+pub struct DoctreeInfo {
+    pub id: String,
+    pub display: String,
+    pub tags: Vec<String>,
+    pub est_tokens: u32,
+    pub selected: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct ApplyDoctreesResult {
+    pub applied: Vec<DomainApply>,
+    pub composed: bool,
+}
+
+/// Acquire the long-running git lock (separate from the swap lock) next to the
+/// active target. Held only across git I/O — never while a swap-lock apply runs,
+/// to keep the lock ordering deadlock-free.
+fn acquire_git_lock(state: &AppState) -> Result<SessionGuard, String> {
+    let target = {
+        let engine = state.engine.lock().map_err(|e| e.to_string())?;
+        engine.target().to_path_buf()
+    };
+    let lock_path = session_lock::default_git_lock_path(&target);
+    session_lock::acquire_blocking(&lock_path).map_err(|e| e.to_string())
+}
+
+/// The drift-comparable baseline profile name, or `None` for the non-comparable
+/// "modified" / "none" sentinels.
+fn real_last_active(state: &AppState) -> Option<String> {
+    let guard = state.last_active.lock().ok()?;
+    match guard.clone() {
+        Some(n) if n != "modified" && n != "none" => Some(n),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    let cfg = {
+        let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+        store.get().map_err(|e| e.to_string())?
+    };
+    let head_sha = if state.git.is_linked() {
+        state.git.head_sha().ok()
+    } else {
+        None
+    };
+    Ok(match cfg {
+        Some(c) => SyncStatus {
+            linked: true,
+            remote_url: Some(c.remote_url),
+            branch: Some(c.branch),
+            last_synced_sha: c.last_synced_sha,
+            head_sha,
+            auto_pull: c.auto_pull,
+            auto_push: c.auto_push,
+        },
+        None => SyncStatus {
+            linked: false,
+            remote_url: None,
+            branch: None,
+            last_synced_sha: None,
+            head_sha: None,
+            auto_pull: true,
+            auto_push: false,
+        },
+    })
+}
+
+/// Store a fine-grained PAT for a remote in the OS keychain (never persisted to
+/// SQLite/manifest/repo). Used when the OS credential helper can't supply a token.
+#[tauri::command]
+pub fn set_repo_pat(remote_url: String, pat: String) -> Result<(), String> {
+    git_sync::store_pat(&remote_url, &pat).map_err(|e| e.to_string())
+}
+
+/// Link (or re-link) a context repo: clone it into the hidden mirror and
+/// materialize its profiles onto the flat namespace. Conflicts (a flat profile
+/// that already differs from the repo) are reported, never clobbered.
+#[tauri::command]
+pub fn link_repo(
+    remote_url: String,
+    branch: String,
+    pat: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<SyncStatus, String> {
+    if let Some(pat) = pat.as_deref() {
+        if !pat.is_empty() {
+            git_sync::store_pat(&remote_url, pat).map_err(|e| e.to_string())?;
+        }
+    }
+    let claude = default_claude_dir();
+    let (report, head) = {
+        let _git = acquire_git_lock(&state)?;
+        state
+            .git
+            .clone_or_open(&remote_url, &branch)
+            .map_err(|e| e.to_string())?;
+        {
+            let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+            store.link(&remote_url, &branch).map_err(|e| e.to_string())?;
+        }
+        let report = state
+            .git
+            .materialize_profiles(&claude, TARGET_NAME, &[])
+            .map_err(|e| e.to_string())?;
+        let head = state.git.head_sha().map_err(|e| e.to_string())?;
+        (report, head)
+    };
+    let conflicts = count_conflicts(&report);
+    if conflicts == 0 {
+        if let Ok(store) = state.sync_config.lock() {
+            let _ = store.set_synced_sha(&head);
+        }
+    }
+    record_history(&state, Action::GitPull, None, Some("link"), TARGET_GLOBAL, Ok(()));
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    get_sync_status(state)
+}
+
+/// Fetch + fast-forward the mirror, then materialize onto the flat namespace.
+/// Per the partial-pull rule, `last_synced_sha` only advances when there are no
+/// conflicts. If a fast-forwarded profile is the active one, the active file is
+/// re-applied (or recomposed) so it never desyncs from its profile.
+#[tauri::command]
+pub fn fetch_repo(state: State<'_, AppState>, app: AppHandle) -> Result<PullReport, String> {
+    let cfg = {
+        let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+        store
+            .get()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no repo linked".to_string())?
+    };
+    let claude = default_claude_dir();
+    // Git I/O under the git lock only — released before any swap-lock apply.
+    let (report, head) = {
+        let _git = acquire_git_lock(&state)?;
+        let old = state.git.snapshot_mirror_profiles(TARGET_NAME);
+        let head = state
+            .git
+            .fetch_remote_head(&cfg.branch)
+            .map_err(|e| e.to_string())?;
+        state.git.reset_hard_to(&head).map_err(|e| e.to_string())?;
+        let report = state
+            .git
+            .materialize_profiles(&claude, TARGET_NAME, &old)
+            .map_err(|e| e.to_string())?;
+        (report, head)
+    };
+    let conflicts = count_conflicts(&report);
+    if conflicts == 0 {
+        if let Ok(store) = state.sync_config.lock() {
+            let _ = store.set_synced_sha(&head);
+        }
+    }
+    reapply_active_after_pull(&state, &report)?;
+    record_history(&state, Action::GitPull, None, Some("fetch"), TARGET_GLOBAL, Ok(()));
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    Ok(PullReport {
+        entries: report,
+        head_sha: head,
+        advanced: conflicts == 0,
+        conflicts,
+    })
+}
+
+/// Copy the flat profiles into the mirror, commit, and push. Non-fast-forward
+/// pushes are rejected by the remote (never forced) — the user pulls + reconciles
+/// then retries.
+#[tauri::command]
+pub fn push_repo(state: State<'_, AppState>) -> Result<(), String> {
+    let cfg = {
+        let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+        store
+            .get()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no repo linked".to_string())?
+    };
+    let claude = default_claude_dir();
+    let _git = acquire_git_lock(&state)?;
+    state
+        .git
+        .stage_flat_profiles(&claude, TARGET_NAME)
+        .map_err(|e| e.to_string())?;
+    state
+        .git
+        .commit_all("toggler: sync profiles")
+        .map_err(|e| e.to_string())?;
+    let result = state.git.push(&cfg.branch).map_err(|e| e.to_string());
+    match &result {
+        Ok(()) => {
+            if let Ok(head) = state.git.head_sha() {
+                if let Ok(store) = state.sync_config.lock() {
+                    let _ = store.set_synced_sha(&head);
+                }
+            }
+            record_history(&state, Action::GitPush, None, Some(&cfg.branch), TARGET_GLOBAL, Ok(()));
+        }
+        Err(msg) => record_history(
+            &state,
+            Action::GitPush,
+            None,
+            Some(&cfg.branch),
+            TARGET_GLOBAL,
+            Err(msg.as_str()),
+        ),
+    }
+    result
+}
+
+#[tauri::command]
+pub fn set_sync_auto(
+    auto_pull: bool,
+    auto_push: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+    store.set_auto(auto_pull, auto_push).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn unlink_repo(state: State<'_, AppState>) -> Result<(), String> {
+    let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+    store.clear().map_err(|e| e.to_string())
+}
+
+/// List the domain doc-trees declared in the linked repo's manifest, each flagged
+/// with whether it is currently part of the active selection.
+#[tauri::command]
+pub fn list_doctrees(state: State<'_, AppState>) -> Result<Vec<DoctreeInfo>, String> {
+    let manifest_path = state.git.manifest_path();
+    let entries = if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+        git_sync::parse_manifest(&text)
+            .map_err(|e| e.to_string())?
+            .doctrees
+    } else {
+        Vec::new()
+    };
+    let selected = {
+        let store = state.doctree.lock().map_err(|e| e.to_string())?;
+        store.list_selected().map_err(|e| e.to_string())?
+    };
+    Ok(entries
+        .into_iter()
+        .map(|d| DoctreeInfo {
+            selected: selected.iter().any(|s| s == &d.id),
+            id: d.id,
+            display: d.display,
+            tags: d.tags,
+            est_tokens: d.est_tokens,
+        })
+        .collect())
+}
+
+/// Read a domain's INDEX.md from the mirror for preview. The id is traversal-checked.
+#[tauri::command]
+pub fn read_doctree_index(id: String, state: State<'_, AppState>) -> Result<String, String> {
+    doctree::validate_domain_id(&id).map_err(|e| e.to_string())?;
+    let path = state
+        .git
+        .doctrees_dir()
+        .join(&id)
+        .join(doctree::INDEX_NAME);
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+/// Apply an additive domain selection: materialize each selected doc-tree into
+/// `~/.claude/domains/{id}`, GC the now-unselected ones, and recompose the active
+/// CLAUDE.md (base + `@import` lines) through the shared composer. An empty
+/// selection reverts to the flat base profile.
+#[tauri::command]
+pub fn apply_doctrees(
+    ids: Vec<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<ApplyDoctreesResult, String> {
+    let claude = default_claude_dir();
+    let doctrees_dir = state.git.doctrees_dir();
+
+    let mut applied = Vec::new();
+    let mut imports = Vec::new();
+    for id in &ids {
+        let a = doctree::materialize_domain(&doctrees_dir, &claude, id).map_err(|e| e.to_string())?;
+        imports.push(a.import_line.clone());
+        applied.push(a);
+    }
+    doctree::gc_orphans(&claude, &ids).map_err(|e| e.to_string())?;
+
+    let base_name = real_last_active(&state);
+    {
+        let engine = state.engine.lock().map_err(|e| e.to_string())?;
+        if ids.is_empty() {
+            // Reverting to the plain base: re-apply the exact flat profile bytes
+            // when we have one (avoids any composed-vs-flat newline drift).
+            if let Some(name) = &base_name {
+                engine.apply_named(name).map_err(|e| e.to_string())?;
+            } else {
+                let current = std::fs::read_to_string(engine.target()).unwrap_or_default();
+                let base = composer::strip_blocks(&current);
+                composer::compose_and_apply(&engine, &base, &[], None)
+                    .map_err(|e| e.to_string())?;
+            }
+        } else {
+            let current = std::fs::read_to_string(engine.target()).unwrap_or_default();
+            let base = composer::strip_blocks(&current);
+            composer::compose_and_apply(&engine, &base, &imports, None)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    {
+        let store = state.doctree.lock().map_err(|e| e.to_string())?;
+        store.set_selected(&ids).map_err(|e| e.to_string())?;
+    }
+    let composed = !ids.is_empty();
+    set_composed(&state, composed);
+    if let Some(name) = &base_name {
+        record_active(&state, name);
+    }
+    record_history(
+        &state,
+        Action::DoctreeApply,
+        None,
+        Some(&format!("{} domain(s)", ids.len())),
+        TARGET_GLOBAL,
+        Ok(()),
+    );
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    Ok(ApplyDoctreesResult { applied, composed })
+}
+
+fn count_conflicts(report: &[MaterializeEntry]) -> usize {
+    report
+        .iter()
+        .filter(|e| matches!(e.outcome, MaterializeOutcome::Conflict { .. }))
+        .count()
+}
+
+/// After a pull, if the active profile's flat file was updated (Created /
+/// FastForward), re-apply it so the live CLAUDE.md follows the change instead of
+/// silently desyncing. The git lock must already be released (this takes the swap
+/// lock). Recomposes when the active file is composed.
+fn reapply_active_after_pull(
+    state: &AppState,
+    report: &[MaterializeEntry],
+) -> Result<(), String> {
+    let Some(name) = real_last_active(state) else {
+        return Ok(());
+    };
+    let changed = report.iter().any(|e| {
+        e.name == name
+            && matches!(
+                e.outcome,
+                MaterializeOutcome::Created | MaterializeOutcome::FastForward
+            )
+    });
+    if !changed {
+        return Ok(());
+    }
+    let composed = state
+        .active_is_composed
+        .lock()
+        .map(|g| *g)
+        .unwrap_or(false);
+    if composed {
+        recompose_current_selection(state)?;
+    } else {
+        let engine = state.engine.lock().map_err(|e| e.to_string())?;
+        engine.apply_named(&name).map_err(|e| e.to_string())?;
+    }
+    record_active(state, &name);
+    Ok(())
+}
+
+/// Rebuild the composed active file from the persisted domain selection on top of
+/// the current (stripped) base. Used after a pull touches the active base.
+fn recompose_current_selection(state: &AppState) -> Result<(), String> {
+    let ids = {
+        let store = state.doctree.lock().map_err(|e| e.to_string())?;
+        store.list_selected().map_err(|e| e.to_string())?
+    };
+    let claude = default_claude_dir();
+    let doctrees_dir = state.git.doctrees_dir();
+    let mut imports = Vec::new();
+    for id in &ids {
+        if let Ok(a) = doctree::materialize_domain(&doctrees_dir, &claude, id) {
+            imports.push(a.import_line);
+        }
+    }
+    let engine = state.engine.lock().map_err(|e| e.to_string())?;
+    let current = std::fs::read_to_string(engine.target()).unwrap_or_default();
+    let base = composer::strip_blocks(&current);
+    composer::compose_and_apply(&engine, &base, &imports, None).map_err(|e| e.to_string())?;
+    Ok(())
 }

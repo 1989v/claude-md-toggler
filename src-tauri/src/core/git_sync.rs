@@ -312,6 +312,22 @@ impl GitSync {
         read_profiles_dir(&self.profiles_dir(), target_name)
     }
 
+    /// Copy the flat `~/.claude/CLAUDE.md.{name}` profiles into the mirror's
+    /// `profiles/` dir ahead of a commit + push. `read_profiles_dir` already
+    /// excludes origin / composed / swap / invalid names, so the per-machine
+    /// backup and baseline never leave the machine.
+    pub fn stage_flat_profiles(&self, flat_dir: &Path, target_name: &str) -> io::Result<()> {
+        let profiles_dir = self.profiles_dir();
+        fs::create_dir_all(&profiles_dir)?;
+        for (name, content) in read_profiles_dir(flat_dir, target_name) {
+            fs::write(
+                profiles_dir.join(format!("{}.{}", target_name, name)),
+                content,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Classify how each mirror profile maps onto the flat namespace, and apply
     /// the non-conflicting ones (Created / FastForward) by writing the flat file.
     /// Conflicts are returned untouched for the FE drift dialog.
