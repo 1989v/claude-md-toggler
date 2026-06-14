@@ -123,7 +123,7 @@ body,
 
 .mode-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, 1fr);
   background: rgba(255, 255, 255, 0.06);
   border-radius: 7px;
   padding: 2px;
@@ -595,4 +595,208 @@ body,
     border-color: rgba(0, 0, 0, 0.08);
     color: rgba(0, 0, 0, 0.86);
   }
+}
+
+/* ============================================================
+   v0.3 — Connected Context (Sync + Domains + drift dialog)
+   ============================================================ */
+
+/* Shared small button styling for the new panels (the existing .primary rule
+   is scoped to .ed-foot, so the panels need their own). */
+.sync-panel button,
+.domains-panel button,
+.drift-actions button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f3f4f6;
+  transition: background 0.12s, opacity 0.12s;
+}
+
+.sync-panel button:hover,
+.domains-panel button:hover,
+.drift-actions button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.sync-panel button.primary,
+.domains-panel button.primary,
+.drift-actions button.primary {
+  background: rgba(52, 211, 153, 0.18);
+  border-color: rgba(52, 211, 153, 0.4);
+  color: #6ee7b7;
+}
+
+.sync-panel button.danger,
+.drift-actions button.danger {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.36);
+  color: #fca5a5;
+}
+
+.sync-panel button.ghost,
+.drift-actions button.ghost {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.sync-panel button:disabled,
+.domains-panel button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.caption.tiny {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.warn {
+  color: #fcd34d;
+}
+
+/* Sync panel */
+
+.sync-panel,
+.domains-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.sync-row {
+  display: flex;
+  gap: 6px;
+}
+
+.sync-row > * {
+  flex: 1;
+}
+
+.name-input.small {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.repo-url {
+  font-size: 11px;
+  word-break: break-all;
+  color: #d1d5db;
+}
+
+.pull-report {
+  padding: 4px 0;
+}
+
+.sync-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Domains panel */
+
+.doctree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.doctree-list li {
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.doctree-list li.sel {
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.doctree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.doctree-row .name {
+  flex: 1;
+}
+
+.tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 24px;
+}
+
+.tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* Drift dialog */
+
+.drift-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(20, 22, 27, 0.6);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 9px;
+}
+
+.drift-msg {
+  margin: 0;
+  font-size: 12px;
+}
+
+.drift-diff {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 6px;
+  white-space: pre;
+}
+
+.drift-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }

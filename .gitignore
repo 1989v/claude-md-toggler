@@ -31,3 +31,8 @@ pnpm-debug.log*
 
 # Local dev state
 .claude-toggle-history/
+
+# tsc -b incremental + accidental config emits
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

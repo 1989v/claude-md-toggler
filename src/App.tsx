@@ -15,7 +15,51 @@ type MemoryProject = {
   has_memory_file: boolean;
 };
 
-type Mode = "global" | "memory";
+type DriftInfo = {
+  last_active: string;
+  current_content: string;
+  expected_content: string;
+  unified_diff: string;
+};
+
+type SyncStatus = {
+  linked: boolean;
+  remote_url: string | null;
+  branch: string | null;
+  last_synced_sha: string | null;
+  head_sha: string | null;
+  auto_pull: boolean;
+  auto_push: boolean;
+};
+
+type MaterializeOutcome = {
+  kind: "created" | "unchanged" | "fast-forward" | "conflict" | "skipped";
+  local?: string;
+  remote?: string;
+  reason?: string;
+};
+
+type MaterializeEntry = { name: string; outcome: MaterializeOutcome };
+
+type PullReport = {
+  entries: MaterializeEntry[];
+  head_sha: string;
+  advanced: boolean;
+  conflicts: number;
+};
+
+type DoctreeInfo = {
+  id: string;
+  display: string;
+  tags: string[];
+  est_tokens: number;
+  selected: boolean;
+};
+
+type DomainApply = { id: string; import_line: string; warnings: string[] };
+type ApplyDoctreesResult = { applied: DomainApply[]; composed: boolean };
+
+type Mode = "global" | "memory" | "sync" | "domains";
 
 type EditorView =
   | { kind: "new" }
@@ -25,7 +69,8 @@ function App() {
   const [mode, setMode] = useState<Mode>("global");
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [active, setActive] = useState<string>("origin");
-  const [hasDrift, setHasDrift] = useState(false);
+  const [drift, setDrift] = useState<DriftInfo | null>(null);
+  const [showDrift, setShowDrift] = useState(false);
 
   const [memoryProjects, setMemoryProjects] = useState<MemoryProject[]>([]);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
@@ -34,16 +79,18 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
+  const hasDrift = drift !== null;
+
   const refreshGlobal = useCallback(async () => {
     try {
-      const [list, current, drift] = await Promise.all([
+      const [list, current, driftInfo] = await Promise.all([
         invoke<ProfileSummary[]>("list_profiles"),
         invoke<string>("get_active_profile"),
-        invoke<unknown>("check_drift"),
+        invoke<DriftInfo | null>("check_drift"),
       ]);
       setProfiles(list);
       setActive(current);
-      setHasDrift(drift !== null);
+      setDrift(driftInfo);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -74,10 +121,11 @@ function App() {
   }, [selectedProject]);
 
   const refresh = useCallback(async () => {
-    if (mode === "global") {
-      await refreshGlobal();
-    } else {
+    if (mode === "memory") {
       await refreshMemory();
+    } else {
+      // global / sync / domains all show the global active + drift state.
+      await refreshGlobal();
     }
   }, [mode, refreshGlobal, refreshMemory]);
 
@@ -98,9 +146,13 @@ function App() {
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     (async () => {
-      unlisten = await listen("claude-md:changed", () => {
-        refresh();
-      });
+      // Reuse the v0.1 change event plus the v0.3 sibling events so the popover
+      // stays reactive after a background pull / doctree apply.
+      const events = ["claude-md:changed", "repo:synced", "doctree:changed"];
+      const unlisteners = await Promise.all(
+        events.map((e) => listen(e, () => refresh())),
+      );
+      unlisten = () => unlisteners.forEach((u) => u());
     })();
     return () => {
       unlisten?.();
@@ -110,20 +162,12 @@ function App() {
   async function toggle(name: string) {
     if (busy) return;
     setError(null);
-
+    // Drift present → surface the 4-button dialog instead of silently
+    // discarding. The user resolves, then retries the toggle.
     if (mode === "global" && hasDrift) {
-      const ok = confirm(
-        "CLAUDE.md was edited outside the app. Discard those edits and switch profiles?",
-      );
-      if (!ok) return;
-      try {
-        await invoke("resolve_drift_discard");
-      } catch (e) {
-        setError(String(e));
-        return;
-      }
+      setShowDrift(true);
+      return;
     }
-
     setBusy(name);
     try {
       if (mode === "global") {
@@ -160,6 +204,21 @@ function App() {
     }
   }
 
+  async function resolveDrift(
+    cmd:
+      | "resolve_drift_apply_to_active"
+      | "resolve_drift_apply_to_origin"
+      | "resolve_drift_discard",
+  ) {
+    try {
+      await invoke(cmd);
+      setShowDrift(false);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   if (editor) {
     return (
       <Editor
@@ -175,6 +234,8 @@ function App() {
     );
   }
 
+  const showProfileList = mode === "global" || mode === "memory";
+
   return (
     <main className="pop">
       <header className="pop-head">
@@ -185,43 +246,47 @@ function App() {
               {mode === "memory" && !selectedProject ? "pick a project" : active}
             </span>
             {mode === "global" && hasDrift && (
-              <span className="badge-edit" title="CLAUDE.md edited outside the app">
+              <button
+                className="badge-edit"
+                title="CLAUDE.md edited outside the app — click to resolve"
+                onClick={() => setShowDrift(true)}
+              >
                 edited
-              </span>
+              </button>
             )}
           </div>
-          <button
-            className="ico-btn"
-            title="New profile"
-            onClick={() => setEditor({ kind: "new" })}
-          >
-            +
-          </button>
+          {showProfileList && (
+            <button
+              className="ico-btn"
+              title="New profile"
+              onClick={() => setEditor({ kind: "new" })}
+            >
+              +
+            </button>
+          )}
         </div>
 
         <div className="mode-switch" role="tablist">
-          <button
-            role="tab"
-            aria-selected={mode === "global"}
-            className={mode === "global" ? "on" : ""}
-            onClick={() => {
-              setMode("global");
-              setEditor(null);
-            }}
-          >
-            Global
-          </button>
-          <button
-            role="tab"
-            aria-selected={mode === "memory"}
-            className={mode === "memory" ? "on" : ""}
-            onClick={() => {
-              setMode("memory");
-              setEditor(null);
-            }}
-          >
-            Memory
-          </button>
+          {(["global", "memory", "sync", "domains"] as Mode[]).map((m) => (
+            <button
+              key={m}
+              role="tab"
+              aria-selected={mode === m}
+              className={mode === m ? "on" : ""}
+              onClick={() => {
+                setMode(m);
+                setEditor(null);
+              }}
+            >
+              {m === "global"
+                ? "Global"
+                : m === "memory"
+                  ? "Memory"
+                  : m === "sync"
+                    ? "Sync"
+                    : "Domains"}
+            </button>
+          ))}
         </div>
 
         {mode === "memory" && (
@@ -243,68 +308,426 @@ function App() {
 
       {error && <div className="error compact">{error}</div>}
 
-      <ul className="prof-list">
-        {profiles.length === 0 && mode === "memory" && !selectedProject && (
-          <li className="empty">Pick a project above.</li>
-        )}
-        {profiles.length === 0 && (mode === "global" || selectedProject) && (
-          <li className="empty">No profile files found.</li>
-        )}
-        {profiles.map((p) => (
-          <li
-            key={p.name}
-            className={[
-              p.is_active ? "active" : "",
-              busy === p.name ? "busy" : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-          >
-            <button
-              className="row-main"
-              onClick={() => toggle(p.name)}
-              title={`Toggle to ${p.name}`}
+      {showDrift && drift && (
+        <DriftDialog
+          drift={drift}
+          onResolve={resolveDrift}
+          onCancel={() => setShowDrift(false)}
+        />
+      )}
+
+      {showProfileList && (
+        <ul className="prof-list">
+          {profiles.length === 0 && mode === "memory" && !selectedProject && (
+            <li className="empty">Pick a project above.</li>
+          )}
+          {profiles.length === 0 && (mode === "global" || selectedProject) && (
+            <li className="empty">No profile files found.</li>
+          )}
+          {profiles.map((p) => (
+            <li
+              key={p.name}
+              className={[
+                p.is_active ? "active" : "",
+                busy === p.name ? "busy" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
-              <span className="dot" />
-              <span className="name">{p.name}</span>
-              {p.name === "origin" && <em className="hint">backup</em>}
-            </button>
-            <div className="row-actions">
               <button
-                className="ico-btn"
-                title={p.name === "origin" ? "View" : "Edit"}
-                onClick={() =>
-                  setEditor({
-                    kind: "edit",
-                    name: p.name,
-                    readOnly: p.name === "origin",
-                  })
-                }
+                className="row-main"
+                onClick={() => toggle(p.name)}
+                title={`Toggle to ${p.name}`}
               >
-                ✎
+                <span className="dot" />
+                <span className="name">{p.name}</span>
+                {p.name === "origin" && <em className="hint">backup</em>}
               </button>
-              {p.name !== "origin" && (
+              <div className="row-actions">
                 <button
-                  className="ico-btn danger"
-                  title="Delete"
-                  onClick={() => onDelete(p.name)}
+                  className="ico-btn"
+                  title={p.name === "origin" ? "View" : "Edit"}
+                  onClick={() =>
+                    setEditor({
+                      kind: "edit",
+                      name: p.name,
+                      readOnly: p.name === "origin",
+                    })
+                  }
                 >
-                  ⊖
+                  ✎
                 </button>
+                {p.name !== "origin" && (
+                  <button
+                    className="ico-btn danger"
+                    title="Delete"
+                    onClick={() => onDelete(p.name)}
+                  >
+                    ⊖
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {mode === "sync" && <SyncPanel onError={setError} onChanged={refresh} />}
+      {mode === "domains" && <DomainsPanel onError={setError} />}
+
+      <footer className="pop-foot">
+        <span className="caption">
+          {mode === "memory"
+            ? "~/.claude/projects/…/memory/MEMORY.md.*"
+            : mode === "sync"
+              ? "context repo ↔ ~/.claude/.toggler-sync"
+              : mode === "domains"
+                ? "~/.claude/domains/* (additive @import)"
+                : "~/.claude/CLAUDE.md.*"}
+        </span>
+      </footer>
+    </main>
+  );
+}
+
+function DriftDialog(props: {
+  drift: DriftInfo;
+  onResolve: (
+    cmd:
+      | "resolve_drift_apply_to_active"
+      | "resolve_drift_apply_to_origin"
+      | "resolve_drift_discard",
+  ) => void;
+  onCancel: () => void;
+}) {
+  const { drift, onResolve, onCancel } = props;
+  return (
+    <div className="drift-modal" role="dialog" aria-label="Resolve external edit">
+      <p className="drift-msg">
+        <strong>CLAUDE.md was edited outside the app.</strong> Baseline:{" "}
+        <code>{drift.last_active}</code>
+      </p>
+      <pre className="drift-diff">{drift.unified_diff}</pre>
+      <div className="drift-actions">
+        <button
+          className="primary"
+          title="Save the current edits back into this profile"
+          onClick={() => onResolve("resolve_drift_apply_to_active")}
+        >
+          Keep edits → profile
+        </button>
+        <button
+          title="Promote the current edits as the origin baseline"
+          onClick={() => onResolve("resolve_drift_apply_to_origin")}
+        >
+          Keep edits → origin
+        </button>
+        <button
+          className="danger"
+          title="Throw the external edits away and restore the profile"
+          onClick={() => onResolve("resolve_drift_discard")}
+        >
+          Discard edits
+        </button>
+        <button className="ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SyncPanel(props: {
+  onError: (e: string | null) => void;
+  onChanged: () => void;
+}) {
+  const { onError, onChanged } = props;
+  const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [pat, setPat] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [lastPull, setLastPull] = useState<PullReport | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await invoke<SyncStatus>("get_sync_status"));
+      onError(null);
+    } catch (e) {
+      onError(String(e));
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function run(label: string, fn: () => Promise<void>) {
+    setBusy(label);
+    try {
+      await fn();
+      onError(null);
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(null);
+      await load();
+    }
+  }
+
+  if (!status) return <div className="empty">Loading…</div>;
+
+  if (!status.linked) {
+    return (
+      <div className="sync-panel">
+        <p className="caption">Link a context repo to sync profiles + doc-trees.</p>
+        <input
+          className="name-input"
+          placeholder="https://github.com/you/claude-md-context.git"
+          value={remoteUrl}
+          onChange={(e) => setRemoteUrl(e.target.value)}
+        />
+        <div className="sync-row">
+          <input
+            className="name-input small"
+            placeholder="branch"
+            value={branch}
+            onChange={(e) => setBranch(e.target.value)}
+          />
+          <input
+            className="name-input small"
+            placeholder="PAT (optional)"
+            type="password"
+            value={pat}
+            onChange={(e) => setPat(e.target.value)}
+          />
+        </div>
+        <button
+          className="primary"
+          disabled={!remoteUrl || busy !== null}
+          onClick={() =>
+            run("link", async () => {
+              await invoke("link_repo", {
+                remoteUrl,
+                branch,
+                pat: pat || null,
+              });
+              onChanged();
+            })
+          }
+        >
+          {busy === "link" ? "Linking…" : "Link repo"}
+        </button>
+        <p className="caption tiny">
+          Uses your OS credential helper (the token gh already stored) when no PAT
+          is given.
+        </p>
+      </div>
+    );
+  }
+
+  const synced = status.last_synced_sha?.slice(0, 7) ?? "—";
+  const head = status.head_sha?.slice(0, 7) ?? "—";
+
+  return (
+    <div className="sync-panel">
+      <div className="sync-status">
+        <code className="repo-url">{status.remote_url}</code>
+        <span className="caption tiny">
+          branch <b>{status.branch}</b> · synced {synced} · head {head}
+        </span>
+      </div>
+
+      <div className="sync-row">
+        <button
+          className="primary"
+          disabled={busy !== null}
+          onClick={() =>
+            run("fetch", async () => {
+              const report = await invoke<PullReport>("fetch_repo");
+              setLastPull(report);
+              onChanged();
+            })
+          }
+        >
+          {busy === "fetch" ? "Fetching…" : "Fetch ↓"}
+        </button>
+        <button
+          disabled={busy !== null}
+          onClick={() =>
+            run("push", async () => {
+              await invoke("push_repo");
+            })
+          }
+        >
+          {busy === "push" ? "Pushing…" : "Push ↑"}
+        </button>
+      </div>
+
+      {lastPull && (
+        <div className="pull-report">
+          <span className="caption tiny">
+            pulled {lastPull.head_sha.slice(0, 7)} ·{" "}
+            {lastPull.conflicts > 0 ? (
+              <b className="warn">{lastPull.conflicts} conflict(s) — resolve in Global</b>
+            ) : (
+              <span>{lastPull.entries.length} profile(s), no conflicts</span>
+            )}
+          </span>
+        </div>
+      )}
+
+      <label className="sync-opt">
+        <input
+          type="checkbox"
+          checked={status.auto_pull}
+          onChange={(e) =>
+            run("auto", () =>
+              invoke("set_sync_auto", {
+                autoPull: e.target.checked,
+                autoPush: status.auto_push,
+              }).then(() => {}),
+            )
+          }
+        />
+        auto-pull on startup
+      </label>
+      <label className="sync-opt">
+        <input
+          type="checkbox"
+          checked={status.auto_push}
+          onChange={(e) =>
+            run("auto", () =>
+              invoke("set_sync_auto", {
+                autoPull: status.auto_pull,
+                autoPush: e.target.checked,
+              }).then(() => {}),
+            )
+          }
+        />
+        auto-push on change
+      </label>
+
+      <button
+        className="ghost"
+        disabled={busy !== null}
+        onClick={() => run("unlink", () => invoke("unlink_repo").then(() => {}))}
+      >
+        Unlink
+      </button>
+    </div>
+  );
+}
+
+function DomainsPanel(props: { onError: (e: string | null) => void }) {
+  const { onError } = props;
+  const [doctrees, setDoctrees] = useState<DoctreeInfo[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [applied, setApplied] = useState<ApplyDoctreesResult | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const list = await invoke<DoctreeInfo[]>("list_doctrees");
+      setDoctrees(list);
+      setSelected(new Set(list.filter((d) => d.selected).map((d) => d.id)));
+      onError(null);
+    } catch (e) {
+      onError(String(e));
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  function toggleId(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function apply() {
+    setBusy(true);
+    try {
+      const result = await invoke<ApplyDoctreesResult>("apply_doctrees", {
+        ids: Array.from(selected),
+      });
+      setApplied(result);
+      onError(null);
+      await load();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!doctrees) return <div className="empty">Loading…</div>;
+  if (doctrees.length === 0) {
+    return (
+      <div className="empty">
+        No doc-trees. Link a context repo with a <code>doctrees/</code> folder in
+        Sync.
+      </div>
+    );
+  }
+
+  const dirty =
+    doctrees.some((d) => d.selected !== selected.has(d.id)) || applied === null;
+
+  return (
+    <div className="domains-panel">
+      <ul className="doctree-list">
+        {doctrees.map((d) => (
+          <li key={d.id} className={selected.has(d.id) ? "sel" : ""}>
+            <label className="doctree-row">
+              <input
+                type="checkbox"
+                checked={selected.has(d.id)}
+                onChange={() => toggleId(d.id)}
+              />
+              <span className="name">{d.display || d.id}</span>
+              {d.est_tokens > 0 && (
+                <span className="caption tiny">~{d.est_tokens} tok</span>
               )}
-            </div>
+            </label>
+            {d.tags.length > 0 && (
+              <div className="tags">
+                {d.tags.map((t) => (
+                  <span key={t} className="tag">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
           </li>
         ))}
       </ul>
 
-      <footer className="pop-foot">
-        <span className="caption">
-          {mode === "global"
-            ? "~/.claude/CLAUDE.md.*"
-            : "~/.claude/projects/…/memory/MEMORY.md.*"}
-        </span>
-      </footer>
-    </main>
+      <button className="primary" disabled={busy || !dirty} onClick={apply}>
+        {busy
+          ? "Applying…"
+          : `Apply (${selected.size} domain${selected.size === 1 ? "" : "s"})`}
+      </button>
+
+      {applied && (
+        <div className="caption tiny">
+          {applied.composed
+            ? `composed: base + ${applied.applied.length} domain(s) — applies to new sessions`
+            : "reverted to plain base profile"}
+          {applied.applied.flatMap((a) => a.warnings).length > 0 && (
+            <span className="warn">
+              {" "}
+              · {applied.applied.flatMap((a) => a.warnings).length} import warning(s)
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -324,18 +747,20 @@ function Editor(props: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Editor only operates on profile namespaces; sync/domains modes never open it.
+  const memoryMode = mode === "memory";
+
   useEffect(() => {
     if (view.kind === "edit") {
-      const cmd = mode === "global" ? "read_profile" : "memory_read_profile";
-      const args =
-        mode === "global"
-          ? { name: view.name }
-          : { projectId, name: view.name };
+      const cmd = memoryMode ? "memory_read_profile" : "read_profile";
+      const args = memoryMode
+        ? { projectId, name: view.name }
+        : { name: view.name };
       invoke<string>(cmd, args)
         .then(setContent)
         .catch((e) => setError(String(e)));
     }
-  }, [view, mode, projectId]);
+  }, [view, memoryMode, projectId]);
 
   async function onSave() {
     setError(null);
@@ -345,7 +770,7 @@ function Editor(props: {
     }
     setSaving(true);
     try {
-      if (mode === "global") {
+      if (!memoryMode) {
         if (isNew) {
           await invoke("create_profile", { name, content });
         } else if (!readOnly) {
@@ -414,7 +839,7 @@ function Editor(props: {
 
       <footer className="ed-foot">
         <span className="caption">
-          {mode === "global"
+          {!memoryMode
             ? `~/.claude/CLAUDE.md.${isNew ? name || "{name}" : view.kind === "edit" ? view.name : ""}`
             : `MEMORY.md.${isNew ? name || "{name}" : view.kind === "edit" ? view.name : ""}`}
         </span>
