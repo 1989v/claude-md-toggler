@@ -619,12 +619,36 @@ function SyncPanel(props: {
   );
 }
 
+// Mirror of the Rust validate_name + RESERVED_NAMES so the New doctree form
+// rejects the same ids the backend would (avoids a confusing late server error).
+const RESERVED_DOCTREE_IDS = new Set(["origin", "tmp", "composed"]);
+function isValidDoctreeId(id: string): boolean {
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id)) return false;
+  if (RESERVED_DOCTREE_IDS.has(id) || id.startsWith("tmp.")) return false;
+  return true;
+}
+
+type CreateDoctreeResult = {
+  id: string;
+  pushed: boolean;
+  push_error: string | null;
+};
+
 function DomainsPanel(props: { onError: (e: string | null) => void }) {
   const { onError } = props;
   const [doctrees, setDoctrees] = useState<DoctreeInfo[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [applied, setApplied] = useState<ApplyDoctreesResult | null>(null);
+
+  const [showNew, setShowNew] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createMsg, setCreateMsg] = useState<string | null>(null);
+  const [nid, setNid] = useState("");
+  const [ndisplay, setNdisplay] = useState("");
+  const [ntags, setNtags] = useState("");
+  const [ntokens, setNtokens] = useState("");
+  const [nbody, setNbody] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -666,66 +690,160 @@ function DomainsPanel(props: { onError: (e: string | null) => void }) {
     }
   }
 
-  if (!doctrees) return <div className="empty">Loading…</div>;
-  if (doctrees.length === 0) {
-    return (
-      <div className="empty">
-        No doc-trees. Link a context repo with a <code>doctrees/</code> folder in
-        Sync.
-      </div>
-    );
+  async function create() {
+    if (!isValidDoctreeId(nid)) {
+      onError(
+        "id must be lowercase a-z / 0-9 / hyphens, 1-64 chars, and not origin/tmp/composed.",
+      );
+      return;
+    }
+    setCreating(true);
+    setCreateMsg(null);
+    try {
+      const res = await invoke<CreateDoctreeResult>("create_doctree", {
+        id: nid,
+        display: ndisplay,
+        tags: ntags
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        estTokens: Number(ntokens) || 0,
+        indexBody: nbody || null,
+      });
+      setCreateMsg(
+        res.pushed
+          ? `created & pushed '${res.id}'`
+          : `created '${res.id}' locally — push rejected, pull then Push${res.push_error ? ` (${res.push_error})` : ""}`,
+      );
+      setNid("");
+      setNdisplay("");
+      setNtags("");
+      setNtokens("");
+      setNbody("");
+      setShowNew(false);
+      onError(null);
+      await load();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setCreating(false);
+    }
   }
+
+  if (!doctrees) return <div className="empty">Loading…</div>;
 
   const dirty =
     doctrees.some((d) => d.selected !== selected.has(d.id)) || applied === null;
 
   return (
     <div className="domains-panel">
-      <ul className="doctree-list">
-        {doctrees.map((d) => (
-          <li key={d.id} className={selected.has(d.id) ? "sel" : ""}>
-            <label className="doctree-row">
-              <input
-                type="checkbox"
-                checked={selected.has(d.id)}
-                onChange={() => toggleId(d.id)}
-              />
-              <span className="name">{d.display || d.id}</span>
-              {d.est_tokens > 0 && (
-                <span className="caption tiny">~{d.est_tokens} tok</span>
-              )}
-            </label>
-            {d.tags.length > 0 && (
-              <div className="tags">
-                {d.tags.map((t) => (
-                  <span key={t} className="tag">
-                    {t}
-                  </span>
-                ))}
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+      <div className="doctree-head">
+        <button className="ghost" onClick={() => setShowNew((v) => !v)}>
+          {showNew ? "Cancel" : "+ New doctree"}
+        </button>
+      </div>
 
-      <button className="primary" disabled={busy || !dirty} onClick={apply}>
-        {busy
-          ? "Applying…"
-          : `Apply (${selected.size} domain${selected.size === 1 ? "" : "s"})`}
-      </button>
-
-      {applied && (
-        <div className="caption tiny">
-          {applied.composed
-            ? `composed: base + ${applied.applied.length} domain(s) — applies to new sessions`
-            : "reverted to plain base profile"}
-          {applied.applied.flatMap((a) => a.warnings).length > 0 && (
-            <span className="warn">
-              {" "}
-              · {applied.applied.flatMap((a) => a.warnings).length} import warning(s)
-            </span>
-          )}
+      {showNew && (
+        <div className="new-doctree">
+          <input
+            className="name-input small"
+            placeholder="id (e.g. kubernetes)"
+            value={nid}
+            onChange={(e) => setNid(e.target.value)}
+          />
+          <input
+            className="name-input small"
+            placeholder="display name"
+            value={ndisplay}
+            onChange={(e) => setNdisplay(e.target.value)}
+          />
+          <div className="sync-row">
+            <input
+              className="name-input small"
+              placeholder="tags (comma-sep)"
+              value={ntags}
+              onChange={(e) => setNtags(e.target.value)}
+            />
+            <input
+              className="name-input small"
+              placeholder="est tokens"
+              value={ntokens}
+              onChange={(e) => setNtokens(e.target.value)}
+            />
+          </div>
+          <textarea
+            className="content-area new-body"
+            placeholder="# INDEX.md body (optional — a default skeleton is written if blank)"
+            value={nbody}
+            spellCheck={false}
+            onChange={(e) => setNbody(e.target.value)}
+          />
+          <button
+            className="primary"
+            disabled={creating || !nid}
+            onClick={create}
+          >
+            {creating ? "Creating…" : "Create & push"}
+          </button>
         </div>
+      )}
+      {createMsg && <div className="caption tiny">{createMsg}</div>}
+
+      {doctrees.length === 0 ? (
+        <div className="empty">
+          No doc-trees yet. Create one above, or link a repo with a{" "}
+          <code>doctrees/</code> folder in Sync.
+        </div>
+      ) : (
+        <>
+          <ul className="doctree-list">
+            {doctrees.map((d) => (
+              <li key={d.id} className={selected.has(d.id) ? "sel" : ""}>
+                <label className="doctree-row">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(d.id)}
+                    onChange={() => toggleId(d.id)}
+                  />
+                  <span className="name">{d.display || d.id}</span>
+                  {d.est_tokens > 0 && (
+                    <span className="caption tiny">~{d.est_tokens} tok</span>
+                  )}
+                </label>
+                {d.tags.length > 0 && (
+                  <div className="tags">
+                    {d.tags.map((t) => (
+                      <span key={t} className="tag">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          <button className="primary" disabled={busy || !dirty} onClick={apply}>
+            {busy
+              ? "Applying…"
+              : `Apply (${selected.size} domain${selected.size === 1 ? "" : "s"})`}
+          </button>
+
+          {applied && (
+            <div className="caption tiny">
+              {applied.composed
+                ? `composed: base + ${applied.applied.length} domain(s) — applies to new sessions`
+                : "reverted to plain base profile"}
+              {applied.applied.flatMap((a) => a.warnings).length > 0 && (
+                <span className="warn">
+                  {" "}
+                  · {applied.applied.flatMap((a) => a.warnings).length} import
+                  warning(s)
+                </span>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

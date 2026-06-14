@@ -52,6 +52,7 @@ pub enum Action {
     GitPull,
     GitPush,
     DoctreeApply,
+    DoctreeCreate,
 }
 
 impl Action {
@@ -64,6 +65,7 @@ impl Action {
             Action::GitPull => "git-pull",
             Action::GitPush => "git-push",
             Action::DoctreeApply => "doctree-apply",
+            Action::DoctreeCreate => "doctree-create",
         }
     }
 }

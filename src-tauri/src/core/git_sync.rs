@@ -48,6 +48,8 @@ pub enum GitSyncError {
     ManifestParse(String),
     #[error("not a linked working tree: {0}")]
     NotLinked(PathBuf),
+    #[error("{0}")]
+    Other(String),
 }
 
 // --- manifest -------------------------------------------------------------
@@ -442,6 +444,26 @@ impl GitSync {
         };
         fs::write(self.manifest_path(), render_manifest(&manifest)?)?;
         Ok(())
+    }
+
+    /// Scaffold a brand-new doctree in the mirror: write `doctrees/{id}/INDEX.md`
+    /// and ONLY that file. The id is re-validated (traversal + charset). Rejects an
+    /// already-present INDEX.md — the caller first consults the manifest to tell
+    /// "id taken in repo (pull to use)" from a genuine overwrite.
+    pub fn scaffold_doctree(&self, id: &str, index_body: &str) -> Result<PathBuf, GitSyncError> {
+        crate::core::doctree::validate_domain_id(id)
+            .map_err(|e| GitSyncError::Other(format!("invalid doctree id: {}", e)))?;
+        let dir = self.doctrees_dir().join(id);
+        let index = dir.join(crate::core::doctree::INDEX_NAME);
+        if index.exists() {
+            return Err(GitSyncError::Other(format!(
+                "doctree '{}' already exists in the local mirror",
+                id
+            )));
+        }
+        fs::create_dir_all(&dir)?;
+        fs::write(&index, index_body)?;
+        Ok(index)
     }
 
     /// Snapshot every mirror doctree directory (id → [(relpath, bytes)]) before a
@@ -1048,5 +1070,20 @@ mod tests {
             "remote\n",
             "present doctree left untouched"
         );
+    }
+
+    #[test]
+    fn scaffold_doctree_writes_only_index_and_guards_id() {
+        let dir = tempdir().unwrap();
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        let idx = gs.scaffold_doctree("terraform", "# tf\n").unwrap();
+        assert!(idx.ends_with("doctrees/terraform/INDEX.md"));
+        assert_eq!(fs::read_to_string(&idx).unwrap(), "# tf\n");
+        // overwrite of an existing doctree is rejected
+        assert!(gs.scaffold_doctree("terraform", "x").is_err());
+        // invalid / reserved ids rejected
+        assert!(gs.scaffold_doctree("../evil", "x").is_err());
+        assert!(gs.scaffold_doctree("Origin", "x").is_err());
+        assert!(gs.scaffold_doctree("origin", "x").is_err());
     }
 }

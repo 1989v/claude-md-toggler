@@ -800,3 +800,22 @@ body,
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* v0.4 — doctree authoring form */
+.doctree-head {
+  display: flex;
+  justify-content: flex-end;
+}
+.new-doctree {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.06);
+}
+.content-area.new-body {
+  min-height: 80px;
+  font-size: 11px;
+}

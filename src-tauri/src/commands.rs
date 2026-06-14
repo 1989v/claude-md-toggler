@@ -875,6 +875,109 @@ pub fn read_doctree_index(id: String, state: State<'_, AppState>) -> Result<Stri
     std::fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+pub struct CreateDoctreeResult {
+    pub id: String,
+    /// True when the new doctree was pushed to the remote. False means it was
+    /// committed locally but the push was rejected (e.g. non-fast-forward) — the
+    /// FE shows a 'pull then retry' hint and the local work is preserved.
+    pub pushed: bool,
+    pub push_error: Option<String>,
+}
+
+fn default_index_body(id: &str, display: &str) -> String {
+    let title = if display.is_empty() { id } else { display };
+    format!(
+        "# {}\n\n<!-- Domain doc-tree '{}'. Fan out to detail files with @relative.md imports (max 4 hops). -->\n",
+        title, id
+    )
+}
+
+/// Author a new domain doc-tree: scaffold `doctrees/{id}/INDEX.md` in the mirror,
+/// register it in the manifest (regenerated as a derived artifact), and push.
+/// Id-uniqueness is checked against the MANIFEST (repo truth), so an id already
+/// present from a prior pull yields a clear "pull to use / pick another id"
+/// message rather than a confusing overwrite error. Never touches global active
+/// state; serialized with other git I/O on the single git lock.
+#[tauri::command]
+pub fn create_doctree(
+    id: String,
+    display: String,
+    tags: Vec<String>,
+    est_tokens: u32,
+    index_body: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<CreateDoctreeResult, String> {
+    doctree::validate_domain_id(&id).map_err(|e| e.to_string())?;
+    let cfg = {
+        let store = state.sync_config.lock().map_err(|e| e.to_string())?;
+        store
+            .get()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no repo linked".to_string())?
+    };
+    let mappings = syncable_mappings(&state);
+    let body = index_body.unwrap_or_else(|| default_index_body(&id, &display));
+
+    let _git = acquire_git_lock(&state)?;
+
+    // Id uniqueness against the manifest (repo truth), distinct from on-disk.
+    let manifest_path = state.git.manifest_path();
+    if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+        let m = git_sync::parse_manifest(&text).map_err(|e| e.to_string())?;
+        if m.doctrees.iter().any(|d| d.id == id) {
+            return Err(format!(
+                "doctree '{}' already exists in the repo — pull to use it, or pick a different id",
+                id
+            ));
+        }
+    }
+
+    state
+        .git
+        .scaffold_doctree(&id, &body)
+        .map_err(|e| e.to_string())?;
+    let overrides = vec![git_sync::DoctreeEntry {
+        id: id.clone(),
+        display,
+        tags,
+        est_tokens,
+    }];
+    state
+        .git
+        .regenerate_manifest(TARGET_NAME, &mappings, &overrides)
+        .map_err(|e| e.to_string())?;
+    state
+        .git
+        .stage_paths(&["doctrees/", "manifest.toml", "profiles/"])
+        .map_err(|e| e.to_string())?;
+    state
+        .git
+        .commit_tree(&format!("toggler: author doctree {}", id))
+        .map_err(|e| e.to_string())?;
+
+    let (pushed, push_error) = match state.git.push(&cfg.branch) {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+    record_history(
+        &state,
+        Action::DoctreeCreate,
+        None,
+        Some(&id),
+        TARGET_GLOBAL,
+        if pushed { Ok(()) } else { Err("push rejected") },
+    );
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    Ok(CreateDoctreeResult {
+        id,
+        pushed,
+        push_error,
+    })
+}
+
 /// Apply an additive domain selection: materialize each selected doc-tree into
 /// `~/.claude/domains/{id}`, GC the now-unselected ones, and recompose the active
 /// CLAUDE.md (base + `@import` lines) through the shared composer. An empty
