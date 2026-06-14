@@ -138,6 +138,30 @@ pub fn run() {
                 }
                 Err(e) => eprintln!("[watcher] start failed: {}", e),
             }
+            // Startup auto-pull (v0.3). Best-effort and non-fatal: an offline /
+            // unauthenticated / unlinked machine just keeps working locally.
+            {
+                let state = app.state::<AppState>();
+                let cfg = state
+                    .sync_config
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.get().ok())
+                    .flatten();
+                if let Some(cfg) = cfg {
+                    if cfg.auto_pull && state.git.is_linked() {
+                        match commands::pull_once(&state) {
+                            Ok(r) if r.conflicts > 0 => eprintln!(
+                                "[sync] startup pull: {} conflict(s) await resolution",
+                                r.conflicts
+                            ),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("[sync] startup pull failed (non-fatal): {}", e),
+                        }
+                        let _ = tray::refresh(app.handle());
+                    }
+                }
+            }
             // Apply native vibrancy under the webview so the popover blurs the
             // wallpaper / windows underneath, matching the muxbar / standard
             // NSPopover look. The webview body must keep a transparent

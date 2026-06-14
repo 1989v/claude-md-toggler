@@ -694,6 +694,16 @@ pub fn link_repo(
 /// re-applied (or recomposed) so it never desyncs from its profile.
 #[tauri::command]
 pub fn fetch_repo(state: State<'_, AppState>, app: AppHandle) -> Result<PullReport, String> {
+    let report = pull_once(&state)?;
+    tray::refresh(&app).map_err(|e| e.to_string())?;
+    Ok(report)
+}
+
+/// The pull pipeline shared by the `fetch_repo` command and the startup
+/// auto-pull hook: fetch + hard-reset the mirror, materialize onto the flat
+/// namespace, advance the synced sha only when conflict-free, and re-apply the
+/// active file if its profile moved. Tray refresh is the caller's responsibility.
+pub(crate) fn pull_once(state: &AppState) -> Result<PullReport, String> {
     let cfg = {
         let store = state.sync_config.lock().map_err(|e| e.to_string())?;
         store
@@ -704,7 +714,7 @@ pub fn fetch_repo(state: State<'_, AppState>, app: AppHandle) -> Result<PullRepo
     let claude = default_claude_dir();
     // Git I/O under the git lock only — released before any swap-lock apply.
     let (report, head) = {
-        let _git = acquire_git_lock(&state)?;
+        let _git = acquire_git_lock(state)?;
         let old = state.git.snapshot_mirror_profiles(TARGET_NAME);
         let head = state
             .git
@@ -723,9 +733,8 @@ pub fn fetch_repo(state: State<'_, AppState>, app: AppHandle) -> Result<PullRepo
             let _ = store.set_synced_sha(&head);
         }
     }
-    reapply_active_after_pull(&state, &report)?;
-    record_history(&state, Action::GitPull, None, Some("fetch"), TARGET_GLOBAL, Ok(()));
-    tray::refresh(&app).map_err(|e| e.to_string())?;
+    reapply_active_after_pull(state, &report)?;
+    record_history(state, Action::GitPull, None, Some("fetch"), TARGET_GLOBAL, Ok(()));
     Ok(PullReport {
         entries: report,
         head_sha: head,
