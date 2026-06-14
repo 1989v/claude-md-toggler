@@ -593,6 +593,17 @@ fn acquire_git_lock(state: &AppState) -> Result<SessionGuard, String> {
     session_lock::acquire_blocking(&lock_path).map_err(|e| e.to_string())
 }
 
+/// The slice of local SQLite state that is safe to publish into the shared
+/// (possibly public) context repo's manifest. PRIVACY CHOKEPOINT — v0.4 MVP
+/// returns empty: directory_mappings carry per-machine absolute `dir_path`s
+/// (and `memory:`/`doctree:` targets), so syncing them needs an explicit
+/// user opt-in + a dir_path privacy model (deferred to v0.5). Because the
+/// manifest is regenerated on EVERY push, flipping this on would silently
+/// egress paths on routine profile pushes.
+fn syncable_mappings(_state: &AppState) -> Vec<crate::core::git_sync::MappingEntry> {
+    Vec::new()
+}
+
 /// The drift-comparable baseline profile name, or `None` for the non-comparable
 /// "modified" / "none" sentinels.
 fn real_last_active(state: &AppState) -> Option<String> {
@@ -716,11 +727,19 @@ pub(crate) fn pull_once(state: &AppState) -> Result<PullReport, String> {
     let (report, head) = {
         let _git = acquire_git_lock(state)?;
         let old = state.git.snapshot_mirror_profiles(TARGET_NAME);
+        // Snapshot local doctree dirs so a hard reset that discards a local-only
+        // (un-pushed) doctree can restore it — the concurrent-authoring loser
+        // keeps its work and fast-forwards on the next push.
+        let local_doctrees = state.git.snapshot_mirror_doctrees();
         let head = state
             .git
             .fetch_remote_head(&cfg.branch)
             .map_err(|e| e.to_string())?;
         state.git.reset_hard_to(&head).map_err(|e| e.to_string())?;
+        state
+            .git
+            .restore_missing_doctrees(&local_doctrees)
+            .map_err(|e| e.to_string())?;
         let report = state
             .git
             .materialize_profiles(&claude, TARGET_NAME, &old)
@@ -756,14 +775,26 @@ pub fn push_repo(state: State<'_, AppState>) -> Result<(), String> {
             .ok_or_else(|| "no repo linked".to_string())?
     };
     let claude = default_claude_dir();
+    let mappings = syncable_mappings(&state);
     let _git = acquire_git_lock(&state)?;
     state
         .git
         .stage_flat_profiles(&claude, TARGET_NAME)
         .map_err(|e| e.to_string())?;
+    // Regenerate manifest as a derived artifact (read-existing-first) so newly
+    // authored profiles/doctrees are registered, then stage ONLY the intended
+    // paths (no add_all glob) and commit.
     state
         .git
-        .commit_all("toggler: sync profiles")
+        .regenerate_manifest(TARGET_NAME, &mappings, &[])
+        .map_err(|e| e.to_string())?;
+    state
+        .git
+        .stage_paths(&["profiles/", "doctrees/", "manifest.toml"])
+        .map_err(|e| e.to_string())?;
+    state
+        .git
+        .commit_tree("toggler: sync profiles + manifest")
         .map_err(|e| e.to_string())?;
     let result = state.git.push(&cfg.branch).map_err(|e| e.to_string());
     match &result {

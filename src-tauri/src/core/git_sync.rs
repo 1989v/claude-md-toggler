@@ -328,6 +328,164 @@ impl GitSync {
         Ok(())
     }
 
+    // --- v0.4 authoring: explicit staging + manifest regeneration ----------
+
+    /// Stage explicit relative pathspecs into the index (replacing the
+    /// `add_all('*')` glob `commit_all` uses). A commit then includes ONLY the
+    /// paths v0.4 means to publish (`profiles/`, `doctrees/`, `manifest.toml`),
+    /// so a stray temp/swap file left in the worktree is never committed/pushed.
+    /// `add_all` over each pathspec also picks up deletions under it.
+    pub fn stage_paths(&self, rel_paths: &[&str]) -> Result<(), GitSyncError> {
+        let repo = self.open()?;
+        let mut index = repo.index()?;
+        for rel in rel_paths {
+            index.add_all([rel].iter(), git2::IndexAddOption::DEFAULT, None)?;
+        }
+        index.write()?;
+        Ok(())
+    }
+
+    /// Commit whatever is currently staged (via `stage_paths`) on the current
+    /// branch. Unlike `commit_all` it does NOT re-glob the worktree.
+    pub fn commit_tree(&self, message: &str) -> Result<String, GitSyncError> {
+        let repo = self.open()?;
+        let mut index = repo.index()?;
+        let tree_oid = index.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+        let sig = repo
+            .signature()
+            .or_else(|_| git2::Signature::now("claude-md-toggler", "toggler@localhost"))?;
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)?;
+        Ok(oid.to_string())
+    }
+
+    /// Rebuild `manifest.toml` as a DERIVED artifact. v0.3 never regenerated it,
+    /// so scaffolded doctrees/profiles went stale; this is the single producer.
+    ///
+    /// STEP 1 reads the EXISTING manifest FIRST — doctree `display`/`tags`/
+    /// `est_tokens` live only there (not on disk), so a write-without-read would
+    /// destroy metadata for every doctree the user did not author this session.
+    /// `overrides` supply fresh metadata for newly-authored doctrees and win
+    /// field-wise over the existing entry (re-authoring intent). `syncable_mappings`
+    /// is the privacy chokepoint (MVP: empty). Output is deterministically sorted
+    /// for byte-identical churn-free regeneration.
+    pub fn regenerate_manifest(
+        &self,
+        target_name: &str,
+        syncable_mappings: &[MappingEntry],
+        overrides: &[DoctreeEntry],
+    ) -> Result<(), GitSyncError> {
+        // STEP 1 — existing manifest is the metadata source of record.
+        let existing = fs::read_to_string(self.manifest_path())
+            .ok()
+            .and_then(|t| parse_manifest(&t).ok())
+            .unwrap_or_default();
+        let mut meta: std::collections::HashMap<String, DoctreeEntry> = existing
+            .doctrees
+            .into_iter()
+            .map(|d| (d.id.clone(), d))
+            .collect();
+        for ov in overrides {
+            let merged = match meta.remove(&ov.id) {
+                Some(prev) => merge_doctree(prev, ov),
+                None => ov.clone(),
+            };
+            meta.insert(ov.id.clone(), merged);
+        }
+
+        // STEP 2 — profiles present on disk.
+        let mut profiles: Vec<ProfileEntry> = read_profiles_dir(&self.profiles_dir(), target_name)
+            .into_iter()
+            .map(|(name, _)| ProfileEntry { name })
+            .collect();
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // STEP 3 — doctrees present on disk, metadata merged by id.
+        let mut doctrees = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.doctrees_dir()) {
+            for entry in rd.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let id = entry.file_name().to_string_lossy().into_owned();
+                if crate::core::doctree::validate_domain_id(&id).is_err() {
+                    continue;
+                }
+                if !entry
+                    .path()
+                    .join(crate::core::doctree::INDEX_NAME)
+                    .is_file()
+                {
+                    continue;
+                }
+                let mut d = meta.remove(&id).unwrap_or(DoctreeEntry {
+                    id: id.clone(),
+                    display: String::new(),
+                    tags: Vec::new(),
+                    est_tokens: 0,
+                });
+                d.id = id;
+                d.tags.sort();
+                doctrees.push(d);
+            }
+        }
+        doctrees.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // STEP 4 — render + write.
+        let manifest = Manifest {
+            schema_version: existing.schema_version.max(3),
+            profiles,
+            doctrees,
+            mappings: syncable_mappings.to_vec(),
+        };
+        fs::write(self.manifest_path(), render_manifest(&manifest)?)?;
+        Ok(())
+    }
+
+    /// Snapshot every mirror doctree directory (id → [(relpath, bytes)]) before a
+    /// hard reset, so a local-only (un-pushed, committed) doctree that the reset
+    /// would discard can be restored — letting a concurrent-authoring "loser"
+    /// keep its work and fast-forward on the next push.
+    pub fn snapshot_mirror_doctrees(&self) -> Vec<(String, Vec<(String, Vec<u8>)>)> {
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(self.doctrees_dir()) else {
+            return out;
+        };
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            out.push((id, collect_files(&path, &path)));
+        }
+        out
+    }
+
+    /// Restore any snapshotted doctree whose directory is absent after a reset
+    /// (i.e. the remote did not have it). Present directories are left untouched.
+    pub fn restore_missing_doctrees(
+        &self,
+        snapshot: &[(String, Vec<(String, Vec<u8>)>)],
+    ) -> io::Result<()> {
+        for (id, files) in snapshot {
+            let dir = self.doctrees_dir().join(id);
+            if dir.exists() {
+                continue;
+            }
+            for (rel, bytes) in files {
+                let dest = dir.join(rel);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(dest, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Classify how each mirror profile maps onto the flat namespace, and apply
     /// the non-conflicting ones (Created / FastForward) by writing the flat file.
     /// Conflicts are returned untouched for the FE drift dialog.
@@ -403,6 +561,49 @@ fn read_profiles_dir(dir: &Path, target_name: &str) -> Vec<(String, String)> {
         };
         if let Ok(content) = fs::read_to_string(entry.path()) {
             out.push((name.to_string(), content));
+        }
+    }
+    out
+}
+
+/// Field-wise merge for manifest regeneration: an override's non-empty fields
+/// win over the existing entry (re-authoring intent), empty fields fall back to
+/// the preserved existing metadata.
+fn merge_doctree(prev: DoctreeEntry, ov: &DoctreeEntry) -> DoctreeEntry {
+    DoctreeEntry {
+        id: ov.id.clone(),
+        display: if ov.display.is_empty() {
+            prev.display
+        } else {
+            ov.display.clone()
+        },
+        tags: if ov.tags.is_empty() {
+            prev.tags
+        } else {
+            ov.tags.clone()
+        },
+        est_tokens: if ov.est_tokens == 0 {
+            prev.est_tokens
+        } else {
+            ov.est_tokens
+        },
+    }
+}
+
+/// Recursively collect every file under `dir` as (path-relative-to-`base`, bytes).
+fn collect_files(base: &Path, dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            out.extend(collect_files(base, &path));
+        } else if let Ok(bytes) = fs::read(&path) {
+            if let Ok(rel) = path.strip_prefix(base) {
+                out.push((rel.to_string_lossy().into_owned(), bytes));
+            }
         }
     }
     out
@@ -730,5 +931,122 @@ mod tests {
         b.reset_hard_to(&head).unwrap();
         assert_eq!(b.head_sha().unwrap(), a_sha);
         assert!(b.profiles_dir().join("CLAUDE.md.new-one").exists());
+    }
+
+    // --- v0.4 manifest regeneration + egress containment -------------------
+
+    fn seed_doctree(gs: &GitSync, id: &str, index_body: &str) {
+        let d = gs.doctrees_dir().join(id);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("INDEX.md"), index_body).unwrap();
+    }
+
+    #[test]
+    fn regenerate_manifest_preserves_existing_doctree_metadata() {
+        let dir = tempdir().unwrap();
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        fs::create_dir_all(gs.profiles_dir()).unwrap();
+        fs::write(gs.profiles_dir().join("CLAUDE.md.quality-first"), "q").unwrap();
+        seed_doctree(&gs, "kubernetes", "# k8s");
+        // existing manifest carries metadata that lives ONLY here.
+        fs::write(
+            gs.manifest_path(),
+            "schema_version = 3\n[[doctree]]\nid = \"kubernetes\"\ndisplay = \"Kubernetes\"\ntags = [\"infra\"]\nest_tokens = 4200\n",
+        )
+        .unwrap();
+
+        gs.regenerate_manifest("CLAUDE.md", &[], &[]).unwrap();
+
+        let m = parse_manifest(&fs::read_to_string(gs.manifest_path()).unwrap()).unwrap();
+        assert!(m.profiles.iter().any(|p| p.name == "quality-first"));
+        let k = m.doctrees.iter().find(|d| d.id == "kubernetes").unwrap();
+        assert_eq!(k.display, "Kubernetes", "metadata must survive regeneration");
+        assert_eq!(k.est_tokens, 4200);
+        assert_eq!(k.tags, vec!["infra".to_string()]);
+    }
+
+    #[test]
+    fn regenerate_manifest_override_wins_field_wise() {
+        let dir = tempdir().unwrap();
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        seed_doctree(&gs, "redis", "# redis");
+        fs::write(
+            gs.manifest_path(),
+            "schema_version = 3\n[[doctree]]\nid = \"redis\"\ndisplay = \"Old\"\nest_tokens = 100\n",
+        )
+        .unwrap();
+
+        let ov = DoctreeEntry {
+            id: "redis".into(),
+            display: "New Redis".into(),
+            tags: vec!["db".into()],
+            est_tokens: 0,
+        };
+        gs.regenerate_manifest("CLAUDE.md", &[], &[ov]).unwrap();
+
+        let m = parse_manifest(&fs::read_to_string(gs.manifest_path()).unwrap()).unwrap();
+        let r = m.doctrees.iter().find(|d| d.id == "redis").unwrap();
+        assert_eq!(r.display, "New Redis"); // override non-empty wins
+        assert_eq!(r.tags, vec!["db".to_string()]);
+        assert_eq!(r.est_tokens, 100, "override 0 falls back to existing");
+    }
+
+    #[test]
+    fn regenerate_manifest_skips_doctree_without_index() {
+        let dir = tempdir().unwrap();
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        fs::create_dir_all(gs.doctrees_dir().join("noindex")).unwrap();
+        seed_doctree(&gs, "good", "x");
+        gs.regenerate_manifest("CLAUDE.md", &[], &[]).unwrap();
+        let m = parse_manifest(&fs::read_to_string(gs.manifest_path()).unwrap()).unwrap();
+        let ids: Vec<_> = m.doctrees.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(ids, vec!["good".to_string()]);
+    }
+
+    #[test]
+    fn stage_paths_commit_excludes_stray_files() {
+        let dir = tempdir().unwrap();
+        let remote = seed_bare_remote(dir.path());
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        gs.clone_or_open(remote.to_str().unwrap(), "main").unwrap();
+        fs::write(gs.profiles_dir().join("CLAUDE.md.new"), "n").unwrap();
+        fs::write(gs.worktree().join("stray.tmp"), "junk").unwrap();
+
+        gs.stage_paths(&["profiles/", "manifest.toml"]).unwrap();
+        gs.commit_tree("explicit paths only").unwrap();
+        gs.push("main").unwrap();
+
+        let gs2 = GitSync::new(&dir.path().join(".claude2"));
+        gs2.clone_or_open(remote.to_str().unwrap(), "main").unwrap();
+        assert!(gs2.profiles_dir().join("CLAUDE.md.new").exists());
+        assert!(
+            !gs2.worktree().join("stray.tmp").exists(),
+            "stray temp must never be committed"
+        );
+    }
+
+    #[test]
+    fn restore_missing_doctrees_brings_back_local_only_but_not_present() {
+        let dir = tempdir().unwrap();
+        let gs = GitSync::new(&dir.path().join(".claude"));
+        seed_doctree(&gs, "kafka", "# kafka\n");
+        let snap = gs.snapshot_mirror_doctrees();
+        // simulate a hard reset that removed the local-only doctree
+        fs::remove_dir_all(gs.doctrees_dir().join("kafka")).unwrap();
+        // and a different doctree that the remote DID have
+        seed_doctree(&gs, "redis", "remote\n");
+
+        gs.restore_missing_doctrees(&snap).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(gs.doctrees_dir().join("kafka/INDEX.md")).unwrap(),
+            "# kafka\n",
+            "local-only doctree restored"
+        );
+        assert_eq!(
+            fs::read_to_string(gs.doctrees_dir().join("redis/INDEX.md")).unwrap(),
+            "remote\n",
+            "present doctree left untouched"
+        );
     }
 }
