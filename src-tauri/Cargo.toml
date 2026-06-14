@@ -27,6 +27,14 @@ notify-debouncer-full = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 fs2 = "0.4"
+# git sync (v0.3). https-only + vendored libgit2: no system git/openssl/ssh
+# dependency at runtime, self-contained in the signed bundle. SSH is left out
+# deliberately to avoid the libssh2/OpenSSL cross-platform build trap.
+git2 = { version = "0.19", default-features = false, features = ["https", "vendored-libgit2"] }
+toml = "0.8"
+# Fine-grained PAT storage in the OS keychain (Security framework / Credential
+# Manager / libsecret). PATs are never written to SQLite, the manifest, or the repo.
+keyring = "2"
 
 [dev-dependencies]
 tempfile = "3"

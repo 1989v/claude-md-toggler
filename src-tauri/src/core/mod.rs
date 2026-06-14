@@ -1,8 +1,10 @@
 pub mod composer;
 pub mod drift;
+pub mod git_sync;
 pub mod history;
 pub mod mappings;
 pub mod memory;
 pub mod profile_store;
 pub mod session_lock;
+pub mod sync_config;
 pub mod toggle_engine;
