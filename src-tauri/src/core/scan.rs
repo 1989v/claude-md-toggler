@@ -340,6 +340,16 @@ pub fn classify_origin(path: &Path, classes: &OriginClasses) -> OriginClass {
     classes.classify_owner(&owner)
 }
 
+/// Working-tree root of the repository containing `path`, if any.
+///
+/// Codex treats this as a hard ceiling for `AGENTS.md` discovery, so the
+/// scanner needs it to avoid listing files that never load.
+fn git_root(path: &Path) -> Option<PathBuf> {
+    let repo = git2::Repository::discover(path).ok()?;
+    let wd = repo.workdir()?.to_path_buf();
+    Some(fs::canonicalize(&wd).unwrap_or(wd))
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -835,42 +845,62 @@ fn scan_codex(
         layers,
     );
 
-    // rank 2 — ancestors, outermost first.
+    // ranks 2/3 — the project chain, bounded by the git root.
     //
-    // NOTE: how far Codex actually walks up, and whether it merges every
-    // AGENTS.md on the way or takes only the nearest, is measurement gate A in
-    // PRD #27 §6 and is not yet settled. Until it is, we list what exists on
-    // the chain and the report must not claim these are all loaded.
-    let mut ancestors: Vec<PathBuf> = Vec::new();
-    let mut parent = cwd.parent();
-    while let Some(p) = parent {
-        ancestors.push(p.join(AGENTS_MD));
-        parent = p.parent();
-    }
-    for path in ancestors.into_iter().rev() {
-        push(
-            path,
-            "ancestor",
-            2,
-            LayerKind::Ancestor,
-            LoadTiming::Always,
-            true,
-            layers,
-        );
+    // Measured against codex-cli 0.153.4 with marker files and
+    // `codex debug prompt-input`:
+    //
+    //   - Outside a git repository NO project `AGENTS.md` loads at all; only
+    //     the user-global one does.
+    //   - Inside one, every `AGENTS.md` from the git root down to the working
+    //     directory is merged, outermost first — not just the nearest.
+    //   - An `AGENTS.md` above the git root never loads. The root is a hard
+    //     ceiling, which is why walking to `/` would list files that are not
+    //     read. (`~/AGENTS.md` is outside `~/IdeaProjects/msa` and is not
+    //     loaded when working there, though a naive ancestor walk lists it.)
+    //
+    // Claude Code's chain is walked separately in `scan_claude` and is NOT
+    // bounded this way.
+    if let Some(root) = git_root(cwd) {
+        let here = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut chain: Vec<PathBuf> = Vec::new();
+        if here.starts_with(&root) {
+            let mut cur = Some(here.as_path());
+            while let Some(dir) = cur {
+                chain.push(dir.to_path_buf());
+                if dir == root {
+                    break;
+                }
+                cur = dir.parent();
+            }
+            chain.reverse();
+        } else {
+            chain.push(here.clone());
+        }
+        let last = chain.len() - 1;
+        for (i, dir) in chain.into_iter().enumerate() {
+            let (bucket, rank, kind) = if i == last {
+                ("project", 3, LayerKind::Project)
+            } else {
+                ("ancestor", 2, LayerKind::Ancestor)
+            };
+            push(
+                dir.join(AGENTS_MD),
+                bucket,
+                rank,
+                kind,
+                LoadTiming::Always,
+                true,
+                layers,
+            );
+        }
     }
 
-    // rank 3 — the project itself
-    push(
-        cwd.join(AGENTS_MD),
-        "project",
-        3,
-        LayerKind::Project,
-        LoadTiming::Always,
-        true,
-        layers,
-    );
-
-    // rank 6 — nested AGENTS.md, on-demand
+    // rank 6 — nested AGENTS.md below the working directory.
+    //
+    // Measured absent from the session-start prompt. Whether Codex picks one
+    // up on touching that subtree is not something `prompt-input` can show, so
+    // these are listed as `Conditional` rather than claiming `OnDemand`.
     let mut subtree = Vec::new();
     collect_subtree(cwd, AGENTS_MD, 0, &mut subtree);
     subtree.sort();
@@ -880,7 +910,7 @@ fn scan_codex(
             "local",
             6,
             LayerKind::Subtree,
-            LoadTiming::OnDemand,
+            LoadTiming::Conditional,
             true,
             layers,
         );
@@ -921,6 +951,17 @@ mod tests {
 
     fn paths(inv: &Inventory) -> Vec<String> {
         inv.layers.iter().map(|l| l.path.clone()).collect()
+    }
+
+    /// Codex only reads project `AGENTS.md` inside a git repository, so any
+    /// Codex fixture has to be one.
+    fn init_repo(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        git2::Repository::init(path).unwrap();
+    }
+
+    fn codex_layers(inv: &Inventory) -> Vec<&Layer> {
+        inv.layers.iter().filter(|l| l.engine == Engine::Codex).collect()
     }
 
     // --- token estimation ---
@@ -1238,6 +1279,7 @@ text @not/an/import trailing
     fn scope_selects_the_requested_engine_only() {
         let (_d, home, roots) = fixture();
         let cwd = home.join("proj");
+        init_repo(&cwd);
         write(&cwd.join(CLAUDE_MD), "claude\n");
         write(&cwd.join(AGENTS_MD), "codex\n");
 
@@ -1272,6 +1314,7 @@ text @not/an/import trailing
     fn both_engines_see_their_own_project_file() {
         let (_d, home, roots) = fixture();
         let cwd = home.join("proj");
+        init_repo(&cwd);
         write(&cwd.join(CLAUDE_MD), "# claude\n");
         write(&cwd.join(AGENTS_MD), "# codex\n");
 
@@ -1288,6 +1331,87 @@ text @not/an/import trailing
             .unwrap();
         assert!(claude_project.path.ends_with("CLAUDE.md"));
         assert!(codex_project.path.ends_with("AGENTS.md"));
+    }
+
+    // --- Codex discovery, measured against codex-cli 0.153.4 ---
+
+    #[test]
+    fn codex_ignores_project_agents_outside_a_git_repo() {
+        let (_d, home, roots) = fixture();
+        let cwd = home.join("loose");
+        write(&cwd.join(AGENTS_MD), "# not in a repo\n");
+        write(&roots.codex_dir.join(AGENTS_MD), "# global\n");
+
+        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let kinds: Vec<_> = codex_layers(&inv).iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![LayerKind::UserGlobal],
+            "outside a repo only the user-global AGENTS.md loads"
+        );
+    }
+
+    #[test]
+    fn codex_merges_the_whole_chain_from_the_git_root_down() {
+        let (_d, home, roots) = fixture();
+        let root = home.join("repo");
+        init_repo(&root);
+        let cwd = root.join("a").join("b");
+        fs::create_dir_all(&cwd).unwrap();
+        write(&root.join(AGENTS_MD), "root\n");
+        write(&root.join("a").join(AGENTS_MD), "mid\n");
+        // `b` itself has none — the chain must still carry the two above it.
+
+        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let chain: Vec<_> = codex_layers(&inv)
+            .iter()
+            .filter(|l| matches!(l.kind, LayerKind::Ancestor | LayerKind::Project))
+            .map(|l| l.path.clone())
+            .collect();
+        assert_eq!(chain.len(), 2, "got {chain:?}");
+        assert!(chain[0].ends_with("/repo/AGENTS.md"), "outermost first");
+        assert!(chain[1].ends_with("/repo/a/AGENTS.md"));
+    }
+
+    #[test]
+    fn codex_never_reads_above_the_git_root() {
+        let (_d, home, roots) = fixture();
+        let root = home.join("repo");
+        init_repo(&root);
+        // Sitting directly above the repo — measured NOT to load.
+        write(&home.join(AGENTS_MD), "above\n");
+        write(&root.join(AGENTS_MD), "inside\n");
+
+        let inv = scan(&root, &home, &roots, EngineScope::Codex).unwrap();
+        let listed: Vec<_> = codex_layers(&inv).iter().map(|l| l.path.clone()).collect();
+        assert!(
+            listed.iter().any(|p| p.ends_with("/repo/AGENTS.md")),
+            "the repo root file loads: {listed:?}"
+        );
+        assert!(
+            !listed.iter().any(|p| p.ends_with("/home/AGENTS.md")),
+            "the git root is a hard ceiling: {listed:?}"
+        );
+    }
+
+    #[test]
+    fn codex_nested_agents_are_conditional_not_session_start() {
+        let (_d, home, roots) = fixture();
+        let cwd = home.join("repo");
+        init_repo(&cwd);
+        write(&cwd.join(AGENTS_MD), "root\n");
+        write(&cwd.join("svc").join(AGENTS_MD), "nested\n");
+
+        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let nested = codex_layers(&inv)
+            .into_iter()
+            .find(|l| l.kind == LayerKind::Subtree)
+            .expect("nested AGENTS.md is still listed");
+        assert_eq!(
+            nested.load,
+            LoadTiming::Conditional,
+            "measured absent at session start, so Always/OnDemand would overclaim"
+        );
     }
 
     // --- capabilities ---
