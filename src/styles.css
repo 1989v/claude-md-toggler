@@ -123,7 +123,9 @@ body,
 
 .mode-switch {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* One column per Mode. A hardcoded count wraps the strip onto a second row
+     the moment a tab is added, in a 360px popover that has no room for it. */
+  grid-template-columns: repeat(5, 1fr);
   background: rgba(255, 255, 255, 0.06);
   border-radius: 7px;
   padding: 2px;
@@ -136,9 +138,9 @@ body,
   border: none;
   color: rgba(255, 255, 255, 0.6);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  padding: 4px 8px;
+  padding: 4px 3px;
   border-radius: 5px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
@@ -828,4 +830,165 @@ body,
   font: inherit;
   padding: 0;
   text-decoration: underline;
+}
+
+/* --- Context inventory (v0.5) --------------------------------------------
+   Read-only panel. Dense by necessity: a real machine lists 30+ layers in a
+   popover that is only so tall, so rows are one line each and the always-
+   loaded ones are the only thing given visual weight. */
+
+.ctx-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  overflow-y: auto;
+}
+
+.ctx-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ctx-controls select {
+  flex: 1;
+  min-width: 0;
+}
+
+.ctx-scope {
+  display: flex;
+  gap: 2px;
+}
+
+.ctx-scope button {
+  padding: 2px 7px;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.ctx-scope button.on {
+  opacity: 1;
+  font-weight: 600;
+}
+
+.ctx-engine-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ctx-layers {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.ctx-layers li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 0;
+  font-size: 11px;
+  opacity: 0.62;
+}
+
+/* Always-loaded layers are the ones costing tokens in every session. */
+.ctx-layers li.always {
+  opacity: 1;
+}
+
+.ctx-layers label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.ctx-layers input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+}
+
+.ctx-kind {
+  flex: none;
+  font-size: 9px;
+  text-transform: lowercase;
+  opacity: 0.55;
+  min-width: 68px;
+}
+
+.ctx-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-tok {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.ctx-build {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ctx-build .name-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ctx-out {
+  border-top: 1px solid rgba(128, 128, 128, 0.22);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.ctx-out-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.ctx-preview {
+  /* `.content-area` sizes itself with `flex: 1`, which does nothing in this
+     plain block parent — without an explicit width the textarea falls back to
+     its default column count and renders about half as wide as the panel. */
+  width: 100%;
+  box-sizing: border-box;
+  height: 120px;
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* Not `.row-actions` — that one is hover-revealed inside a profile row and is
+   invisible anywhere else. */
+.ctx-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ctx-more {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  font: inherit;
+  font-size: 10px;
+  padding: 2px 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ctx-more:hover {
+  color: rgba(255, 255, 255, 0.75);
 }

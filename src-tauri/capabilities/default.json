@@ -4,6 +4,7 @@
   "description": "Default capabilities for the main toggler window",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "clipboard-manager:allow-write-text"
   ]
 }

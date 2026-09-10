@@ -22,8 +22,6 @@
 
 // `core` is a private module, so nothing here is reachable until the command
 // layer consumes it. Drop this once `commands.rs` calls into this module.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -453,8 +451,8 @@ fn render_drift(inv: &Inventory) -> String {
 
 /// The answer contract, restated in the prompt and parsed back in the compare
 /// view. Kept in one string so the two can never drift apart.
-pub const ANSWER_SCHEMA: &str = r#"{
-  "schema_version": 1,
+const ANSWER_SCHEMA_TEMPLATE: &str = r#"{
+  "schema_version": {VERSION},
   "report_id": "<copy the report id from the report, unchanged>",
   "target_model": "<the target model named in the report>",
   "findings": [
@@ -469,6 +467,12 @@ pub const ANSWER_SCHEMA: &str = r#"{
     }
   ]
 }"#;
+
+/// The answer shape, with the contract version filled in from the single
+/// constant so the prompt and the parser can never disagree about it.
+pub fn answer_schema() -> String {
+    ANSWER_SCHEMA_TEMPLATE.replace("{VERSION}", &ANSWER_SCHEMA_VERSION.to_string())
+}
 
 /// Build the paste-ready analysis prompt.
 pub fn render_prompt(inv: &Inventory, opts: &ReportOptions) -> String {
@@ -516,7 +520,7 @@ for a rule that looks redundant but earns its place.\n",
 
     s.push_str("\nAnswer with one JSON object and nothing else — no preamble, no commentary \
 after it. Use exactly this shape:\n\n```json\n");
-    s.push_str(ANSWER_SCHEMA);
+    s.push_str(&answer_schema());
     s.push_str("\n```\n\n");
     s.push_str(&format!(
         "Set `report_id` to `{id}` so the answer can be matched to this snapshot.\n",
@@ -546,6 +550,7 @@ mod tests {
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         let roots = ScanRoots {
+            home: home.clone(),
             claude_dir: home.join(".claude"),
             codex_dir: home.join(".codex"),
             managed_policy: None,
@@ -583,7 +588,7 @@ mod tests {
             .unwrap_or_else(|_| std::env::current_dir().unwrap());
         let out_dir = std::env::var("REPORT_OUT").unwrap_or_else(|_| "/tmp".to_string());
         let roots = ScanRoots::from_home(&home);
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
 
         let o = ReportOptions {
             target_model: std::env::var("TARGET_MODEL")
@@ -593,6 +598,11 @@ mod tests {
         };
         let report = render_report(&inv, &o);
         let prompt = render_prompt(&inv, &o);
+        fs::write(
+            format!("{out_dir}/inventory.json"),
+            serde_json::to_string_pretty(&inv).unwrap(),
+        )
+        .unwrap();
         fs::write(format!("{out_dir}/report.md"), &report).unwrap();
         fs::write(format!("{out_dir}/prompt.md"), &prompt).unwrap();
         println!(
@@ -669,8 +679,8 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "# hi\n");
 
-        let a = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
-        let b = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let a = scan(&cwd, &roots, EngineScope::Claude).unwrap();
+        let b = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert_ne!(a.scanned_at.is_empty(), true);
         assert_eq!(
             report_id(&a),
@@ -684,10 +694,10 @@ tail
         let (_d, home, roots) = fixture();
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "# hi\n");
-        let before = report_id(&scan(&cwd, &home, &roots, EngineScope::Claude).unwrap());
+        let before = report_id(&scan(&cwd, &roots, EngineScope::Claude).unwrap());
 
         write(&cwd.join("CLAUDE.md"), "# hi\nand more\n");
-        let after = report_id(&scan(&cwd, &home, &roots, EngineScope::Claude).unwrap());
+        let after = report_id(&scan(&cwd, &roots, EngineScope::Claude).unwrap());
         assert_ne!(before, after);
     }
 
@@ -700,7 +710,7 @@ tail
         write(&cwd.join("CLAUDE.md"), &"word ".repeat(100));
         write(&cwd.join("svc").join("CLAUDE.md"), &"word ".repeat(400));
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let t = totals_for(&inv, Engine::Claude);
         assert_eq!(t.always_files, 1);
         assert_eq!(t.on_demand_files, 1);
@@ -717,7 +727,7 @@ tail
         fs::create_dir_all(&cwd).unwrap();
         write(&roots.claude_dir.join("settings.json"), &"x".repeat(4000));
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let t = totals_for(&inv, Engine::Claude);
         assert_eq!(t.always_tokens, 0);
         assert_eq!(t.always_files, 0);
@@ -732,7 +742,7 @@ tail
         write(&roots.claude_dir.join("CLAUDE.md"), "same bytes\n");
         write(&cwd.join("CLAUDE.md"), "same bytes\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let dupes = duplicate_content(&inv);
         assert_eq!(dupes.len(), 1, "got {dupes:?}");
         assert_eq!(dupes[0].len(), 2);
@@ -745,7 +755,7 @@ tail
         write(&roots.claude_dir.join("CLAUDE.md"), "one\n");
         write(&cwd.join("CLAUDE.md"), "two\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(duplicate_content(&inv).is_empty());
     }
 
@@ -755,7 +765,7 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert_eq!(empty_layers(&inv).len(), 1);
     }
 
@@ -767,7 +777,7 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "## Head\nSECRET-BODY-TEXT\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let out = render_report(&inv, &opts(EngineScope::Claude));
         assert!(out.contains("Head"), "headings are always present");
         assert!(
@@ -784,7 +794,7 @@ tail
         let target = cwd.join("CLAUDE.md");
         write(&target, "## Head\nINCLUDED-BODY-TEXT\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let mut o = opts(EngineScope::Claude);
         // Exactly the path the inventory reported — the normal FE round-trip.
         o.include_bodies = vec![inv.layers[0].path.clone()];
@@ -804,7 +814,7 @@ tail
         let target = cwd.join("CLAUDE.md");
         write(&target, "## Head\nSHAPE-B-TEXT\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let mut o = opts(EngineScope::Claude);
         o.include_bodies = vec![target.to_string_lossy().to_string()];
         assert_ne!(
@@ -822,7 +832,7 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "# hi\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let mut o = opts(EngineScope::Claude);
         o.target_model = "some-model-v9".into();
         let p = render_prompt(&inv, &o);
@@ -839,10 +849,10 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "# hi\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(!render_prompt(&inv, &opts(EngineScope::Claude)).contains("Cross-engine drift"));
 
-        let inv2 = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv2 = scan(&cwd, &roots, EngineScope::Both).unwrap();
         assert!(render_prompt(&inv2, &opts(EngineScope::Both)).contains("Cross-engine drift"));
     }
 
@@ -854,7 +864,7 @@ tail
         let cwd = home.join("proj");
         write(&cwd.join("CLAUDE.md"), "# hi\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let out = render_report(&inv, &opts(EngineScope::Claude));
         assert!(!out.contains("⚠ company"));
     }
@@ -868,7 +878,7 @@ tail
         write(&cwd.join("CLAUDE.md"), &big);
         write(&cwd.join("AGENTS.md"), "## Conventions\nthin\n## Nav\nsame\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
         let out = render_report(&inv, &opts(EngineScope::Both));
         assert!(out.contains("Cross-engine drift"), "{out}");
         assert!(out.contains("Conventions"));

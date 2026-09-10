@@ -105,6 +105,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
             store: Mutex::new(store),
             engine: Mutex::new(engine),
@@ -223,6 +224,8 @@ pub fn run() {
             commands::create_doctree,
             commands::apply_project_doctrees,
             commands::list_project_doctrees,
+            commands::scan_context,
+            commands::build_context_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -12,6 +12,8 @@ use crate::core::history::{
 use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
 use crate::core::profile_store::{ProfileInfo, COMPOSED_NAME};
+use crate::core::report;
+use crate::core::scan;
 use crate::core::session_lock::{self, SessionGuard};
 use crate::{default_claude_dir, record_active, set_composed, tray, AppState, TARGET_NAME};
 
@@ -1276,4 +1278,48 @@ fn recompose_current_selection(state: &AppState) -> Result<(), String> {
     let base = composer::strip_blocks(&current);
     composer::compose_and_apply(&engine, &base, &imports, None).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Context inventory (v0.5)
+// ---------------------------------------------------------------------------
+
+/// Everything the Context panel needs from one build: the id it must echo back
+/// later, the human-readable report, and the paste-ready prompt.
+#[derive(serde::Serialize)]
+pub struct ContextReport {
+    pub report_id: String,
+    pub report: String,
+    pub prompt: String,
+}
+
+fn scan_roots() -> Result<scan::ScanRoots, String> {
+    scan::ScanRoots::detect().ok_or_else(|| "cannot resolve home directory".to_string())
+}
+
+/// Enumerate the prompt layers reaching `cwd`. Read-only — nothing is written.
+#[tauri::command]
+pub fn scan_context(cwd: String, engine_scope: scan::EngineScope) -> Result<scan::Inventory, String> {
+    let roots = scan_roots()?;
+    scan::scan(std::path::Path::new(&cwd), &roots, engine_scope).map_err(|e| e.to_string())
+}
+
+/// Rescan and render the report plus the analysis prompt.
+///
+/// Rescans rather than taking an inventory from the FE so the `report_id`
+/// always describes what is on disk right now: an id computed from a stale
+/// client-side copy would match an answer that no longer applies.
+#[tauri::command]
+pub fn build_context_report(
+    cwd: String,
+    options: report::ReportOptions,
+) -> Result<ContextReport, String> {
+    let roots = scan_roots()?;
+    let inv = scan::scan(std::path::Path::new(&cwd), &roots, options.engine_scope)
+        .map_err(|e| e.to_string())?;
+    Ok(ContextReport {
+        report_id: report::report_id(&inv),
+        report: report::render_report(&inv, &options),
+        prompt: report::render_prompt(&inv, &options),
+    })
 }

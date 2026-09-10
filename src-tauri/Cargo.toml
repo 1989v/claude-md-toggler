@@ -16,6 +16,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
+# Copy-out for the v0.5 context report. The app never sends the report
+# anywhere itself; the clipboard is the whole egress path and the user drives it.
+tauri-plugin-clipboard-manager = "2"
 window-vibrancy = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

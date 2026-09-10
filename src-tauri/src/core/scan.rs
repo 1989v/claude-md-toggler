@@ -31,8 +31,6 @@
 
 // `core` is a private module, so nothing here is reachable until the report
 // layer consumes it. Drop this once `report.rs` calls `scan`.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -186,6 +184,8 @@ pub struct Inventory {
 /// so tests can point the whole scan at a tempdir.
 #[derive(Debug, Clone)]
 pub struct ScanRoots {
+    /// Used to resolve `@~/...` imports.
+    pub home: PathBuf,
     pub claude_dir: PathBuf,
     pub codex_dir: PathBuf,
     /// Enterprise policy file. `None` on platforms/installs without one.
@@ -197,6 +197,7 @@ pub struct ScanRoots {
 impl ScanRoots {
     pub fn from_home(home: &Path) -> Self {
         Self {
+            home: home.to_path_buf(),
             claude_dir: home.join(".claude"),
             codex_dir: home.join(".codex"),
             managed_policy: managed_policy_path(),
@@ -607,7 +608,7 @@ fn collect_capabilities(dir: &Path, engine: Engine, kind: &str, out: &mut Vec<Ca
 /// Enumerate every prompt layer reaching `cwd`, for the requested engines.
 ///
 /// Read-only: nothing on disk is created or modified.
-pub fn scan(cwd: &Path, home: &Path, roots: &ScanRoots, scope: EngineScope) -> io::Result<Inventory> {
+pub fn scan(cwd: &Path, roots: &ScanRoots, scope: EngineScope) -> io::Result<Inventory> {
     // Normalize once, here, so both engine axes emit the same string for the
     // same directory. They used to differ — one canonicalized and one did not
     // — and on macOS, where /var is a symlink to /private/var, that silently
@@ -620,7 +621,7 @@ pub fn scan(cwd: &Path, home: &Path, roots: &ScanRoots, scope: EngineScope) -> i
     let mut capabilities: Vec<Capability> = Vec::new();
 
     if scope.covers(Engine::Claude) {
-        scan_claude(cwd, home, roots, &classes, &mut layers, &mut capabilities);
+        scan_claude(cwd, roots, &classes, &mut layers, &mut capabilities);
     }
     if scope.covers(Engine::Codex) {
         scan_codex(cwd, roots, &classes, &mut layers, &mut capabilities);
@@ -640,7 +641,6 @@ pub fn scan(cwd: &Path, home: &Path, roots: &ScanRoots, scope: EngineScope) -> i
 
 fn scan_claude(
     cwd: &Path,
-    home: &Path,
     roots: &ScanRoots,
     classes: &OriginClasses,
     layers: &mut Vec<Layer>,
@@ -794,7 +794,7 @@ fn scan_claude(
             fs::canonicalize(&p).unwrap_or(p)
         })
         .collect();
-    let imported = expand_imports(layers, home, classes, &mut visited);
+    let imported = expand_imports(layers, &roots.home, classes, &mut visited);
     layers.extend(imported);
 
     // rank 8 — capabilities, named but not costed
@@ -957,6 +957,7 @@ mod tests {
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         let roots = ScanRoots {
+            home: home.clone(),
             claude_dir: home.join(".claude"),
             codex_dir: home.join(".codex"),
             managed_policy: None,
@@ -1110,7 +1111,7 @@ text @not/an/import trailing
         write(&cwd.join(CLAUDE_MD), "@b.md\n");
         write(&cwd.join("b.md"), "@CLAUDE.md\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let b = inv
             .layers
             .iter()
@@ -1127,7 +1128,7 @@ text @not/an/import trailing
         write(&cwd.join("one.md"), "@nested/two.md\n");
         write(&cwd.join("nested").join("two.md"), "leaf\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let two = inv
             .layers
             .iter()
@@ -1143,7 +1144,7 @@ text @not/an/import trailing
         let cwd = home.join("proj");
         write(&cwd.join(CLAUDE_MD), "@gone/missing.md\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let missing = inv
             .layers
             .iter()
@@ -1168,7 +1169,7 @@ text @not/an/import trailing
             "k8s notes\n",
         );
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(
             paths(&inv).iter().any(|p| p.ends_with("kubernetes/INDEX.md")),
             "composed @domains import must appear in the inventory"
@@ -1185,7 +1186,7 @@ text @not/an/import trailing
         write(&home.join("a").join(CLAUDE_MD), "outer\n");
         write(&home.join("a").join("b").join(CLAUDE_MD), "inner\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let ancestors: Vec<_> = inv
             .layers
             .iter()
@@ -1203,7 +1204,7 @@ text @not/an/import trailing
         let cwd = home.join("bare");
         fs::create_dir_all(&cwd).unwrap();
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
         assert!(
             inv.layers.is_empty(),
             "nothing on disk means nothing listed, got {:?}",
@@ -1220,7 +1221,7 @@ text @not/an/import trailing
         write(&cwd.join("node_modules").join("pkg").join(CLAUDE_MD), "no\n");
         write(&cwd.join(".git").join(CLAUDE_MD), "no\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let subtree: Vec<_> = inv
             .layers
             .iter()
@@ -1244,7 +1245,7 @@ text @not/an/import trailing
         let cwd = home.join("proj");
         write(&cwd.join("a").join("b").join("c").join("d").join(CLAUDE_MD), "deep\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(
             inv.layers.is_empty(),
             "depth beyond the ceiling must not be walked, got {:?}",
@@ -1259,7 +1260,7 @@ text @not/an/import trailing
         fs::create_dir_all(&cwd).unwrap();
         write(&roots.claude_dir.join("settings.json"), "{\"a\":1}\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let s = inv
             .layers
             .iter()
@@ -1281,7 +1282,7 @@ text @not/an/import trailing
             "remembered\n",
         );
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(inv
             .layers
             .iter()
@@ -1298,13 +1299,13 @@ text @not/an/import trailing
         write(&cwd.join(CLAUDE_MD), "claude\n");
         write(&cwd.join(AGENTS_MD), "codex\n");
 
-        let claude = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let claude = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         assert!(claude.layers.iter().all(|l| l.engine == Engine::Claude));
 
-        let codex = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let codex = scan(&cwd, &roots, EngineScope::Codex).unwrap();
         assert!(codex.layers.iter().all(|l| l.engine == Engine::Codex));
 
-        let both = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let both = scan(&cwd, &roots, EngineScope::Both).unwrap();
         assert_eq!(both.layers.len(), claude.layers.len() + codex.layers.len());
     }
 
@@ -1315,7 +1316,7 @@ text @not/an/import trailing
         fs::create_dir_all(&cwd).unwrap();
         write(&roots.codex_dir.join("config.toml"), "model = \"x\"\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Codex).unwrap();
         let cfg = inv
             .layers
             .iter()
@@ -1333,7 +1334,7 @@ text @not/an/import trailing
         write(&cwd.join(CLAUDE_MD), "# claude\n");
         write(&cwd.join(AGENTS_MD), "# codex\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
         let claude_project = inv
             .layers
             .iter()
@@ -1357,7 +1358,7 @@ text @not/an/import trailing
         write(&cwd.join(AGENTS_MD), "# not in a repo\n");
         write(&roots.codex_dir.join(AGENTS_MD), "# global\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Codex).unwrap();
         let kinds: Vec<_> = codex_layers(&inv).iter().map(|l| l.kind).collect();
         assert_eq!(
             kinds,
@@ -1377,7 +1378,7 @@ text @not/an/import trailing
         write(&root.join("a").join(AGENTS_MD), "mid\n");
         // `b` itself has none — the chain must still carry the two above it.
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Codex).unwrap();
         let chain: Vec<_> = codex_layers(&inv)
             .iter()
             .filter(|l| matches!(l.kind, LayerKind::Ancestor | LayerKind::Project))
@@ -1397,7 +1398,7 @@ text @not/an/import trailing
         write(&home.join(AGENTS_MD), "above\n");
         write(&root.join(AGENTS_MD), "inside\n");
 
-        let inv = scan(&root, &home, &roots, EngineScope::Codex).unwrap();
+        let inv = scan(&root, &roots, EngineScope::Codex).unwrap();
         let listed: Vec<_> = codex_layers(&inv).iter().map(|l| l.path.clone()).collect();
         assert!(
             listed.iter().any(|p| p.ends_with("/repo/AGENTS.md")),
@@ -1417,7 +1418,7 @@ text @not/an/import trailing
         write(&cwd.join(AGENTS_MD), "root\n");
         write(&cwd.join("svc").join(AGENTS_MD), "nested\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Codex).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Codex).unwrap();
         let nested = codex_layers(&inv)
             .into_iter()
             .find(|l| l.kind == LayerKind::Subtree)
@@ -1439,7 +1440,7 @@ text @not/an/import trailing
         fs::create_dir_all(&cwd).unwrap();
         write(&roots.codex_dir.join("agents").join("val.toml"), "x\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
         assert!(inv
             .capabilities
             .iter()
@@ -1468,7 +1469,7 @@ text @not/an/import trailing
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap());
         let roots = ScanRoots::from_home(&home);
-        let inv = scan(&cwd, &home, &roots, EngineScope::Both).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Both).unwrap();
 
         for engine in [Engine::Claude, Engine::Codex] {
             let mine: Vec<_> = inv.layers.iter().filter(|l| l.engine == engine).collect();
@@ -1518,7 +1519,7 @@ text @not/an/import trailing
         let cwd = home.join("proj");
         write(&cwd.join(CLAUDE_MD), "# hi\n");
 
-        let inv = scan(&cwd, &home, &roots, EngineScope::Claude).unwrap();
+        let inv = scan(&cwd, &roots, EngineScope::Claude).unwrap();
         let json = serde_json::to_value(&inv.layers[0]).unwrap();
         for field in ["path", "layer", "bytes", "modified", "token_estimate"] {
             assert!(

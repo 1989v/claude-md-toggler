@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 type ProfileSummary = {
   name: string;
@@ -59,7 +60,39 @@ type DoctreeInfo = {
 type DomainApply = { id: string; import_line: string; warnings: string[] };
 type ApplyDoctreesResult = { applied: DomainApply[]; composed: boolean };
 
-type Mode = "global" | "memory" | "sync" | "domains";
+type Engine = "claude" | "codex";
+type EngineScope = "claude" | "codex" | "both";
+type LoadTiming = "always" | "on-demand" | "conditional";
+type OriginClass = "company" | "personal" | "unknown" | "not-a-repo";
+
+type ScanLayer = {
+  path: string;
+  layer: string;
+  bytes: number;
+  modified: string;
+  token_estimate: number;
+  engine: Engine;
+  rank: number;
+  kind: string;
+  load: LoadTiming;
+  origin_class: OriginClass;
+  exists: boolean;
+  in_prompt: boolean;
+  imported_by: string | null;
+};
+
+type Capability = { engine: Engine; kind: string; name: string; source: string };
+
+type Inventory = {
+  cwd: string;
+  scanned_at: string;
+  layers: ScanLayer[];
+  capabilities: Capability[];
+};
+
+type ContextReport = { report_id: string; report: string; prompt: string };
+
+type Mode = "global" | "memory" | "sync" | "domains" | "context";
 
 type EditorView =
   | { kind: "new" }
@@ -267,7 +300,7 @@ function App() {
         </div>
 
         <div className="mode-switch" role="tablist">
-          {(["global", "memory", "sync", "domains"] as Mode[]).map((m) => (
+          {(["global", "memory", "sync", "domains", "context"] as Mode[]).map((m) => (
             <button
               key={m}
               role="tab"
@@ -284,7 +317,9 @@ function App() {
                   ? "Memory"
                   : m === "sync"
                     ? "Sync"
-                    : "Domains"}
+                    : m === "domains"
+                      ? "Domains"
+                      : "Context"}
             </button>
           ))}
         </div>
@@ -374,6 +409,7 @@ function App() {
 
       {mode === "sync" && <SyncPanel onError={setError} onChanged={refresh} />}
       {mode === "domains" && <DomainsPanel onError={setError} />}
+      {mode === "context" && <ContextPanel onError={setError} />}
 
       <footer className="pop-foot">
         <span className="caption">
@@ -383,7 +419,9 @@ function App() {
               ? "context repo ↔ ~/.claude/.toggler-sync"
               : mode === "domains"
                 ? "~/.claude/domains/* (additive @import)"
-                : "~/.claude/CLAUDE.md.*"}
+                : mode === "context"
+                  ? "read-only — nothing is written"
+                  : "~/.claude/CLAUDE.md.*"}
         </span>
       </footer>
     </main>
@@ -1031,3 +1069,290 @@ function Editor(props: {
 }
 
 export default App;
+
+/// Read-only inventory of what the agents actually load here (v0.5).
+///
+/// Nothing in this panel writes to disk. The one thing that leaves the
+/// machine is what the user copies, which is why body inclusion is per-file
+/// and files from a repository they classified as company carry a warning.
+function ContextPanel(props: { onError: (e: string | null) => void }) {
+  const { onError } = props;
+  const [projects, setProjects] = useState<MemoryProject[]>([]);
+  const [cwd, setCwd] = useState<string>("");
+  const [scope, setScope] = useState<EngineScope>("both");
+  const [inv, setInv] = useState<Inventory | null>(null);
+  const [bodies, setBodies] = useState<Set<string>>(new Set());
+  const [model, setModel] = useState("claude-opus-5");
+  const [built, setBuilt] = useState<ContextReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  // A real repo contributes ~30 subtree files. Shown flat they bury the three
+  // rows that actually cost tokens in every session.
+  const [showRest, setShowRest] = useState<Set<Engine>>(new Set());
+
+  useEffect(() => {
+    invoke<MemoryProject[]>("memory_list_projects")
+      .then((ps) => {
+        setProjects(ps);
+        if (!cwd && ps.length > 0) setCwd(ps[0].label);
+      })
+      .catch(() => {});
+    // Only seeding the initial pick; re-running on cwd would fight the user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const runScan = useCallback(async () => {
+    if (!cwd) return;
+    setBusy(true);
+    setBuilt(null);
+    try {
+      const result = await invoke<Inventory>("scan_context", {
+        cwd,
+        engineScope: scope,
+      });
+      setInv(result);
+      // A path that is no longer in the inventory must not stay opted in —
+      // it would silently do nothing on the next build.
+      setBodies((prev) => {
+        const live = new Set(result.layers.map((l) => l.path));
+        return new Set(Array.from(prev).filter((p) => live.has(p)));
+      });
+      onError(null);
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [cwd, scope, onError]);
+
+  useEffect(() => {
+    runScan();
+  }, [runScan]);
+
+  async function build() {
+    setBusy(true);
+    try {
+      const r = await invoke<ContextReport>("build_context_report", {
+        cwd,
+        options: {
+          target_model: model,
+          engine_scope: scope,
+          include_bodies: Array.from(bodies),
+        },
+      });
+      setBuilt(r);
+      onError(null);
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy(what: "report" | "prompt" | "both") {
+    if (!built) return;
+    const text =
+      what === "report"
+        ? built.report
+        : what === "prompt"
+          ? built.prompt
+          : built.prompt;
+    try {
+      await writeText(text);
+      const company = Array.from(bodies).filter((p) =>
+        inv?.layers.some((l) => l.path === p && l.origin_class === "company"),
+      ).length;
+      setCopied(
+        `copied ${text.length.toLocaleString()} chars` +
+          (bodies.size > 0 ? ` · ${bodies.size} file bodies` : " · no bodies") +
+          (company > 0 ? ` · ${company} from a company repo` : ""),
+      );
+      window.setTimeout(() => setCopied(null), 6000);
+    } catch (e) {
+      onError(String(e));
+    }
+  }
+
+  function toggleBody(path: string) {
+    setBodies((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  const engines: Engine[] =
+    scope === "both" ? ["claude", "codex"] : [scope as Engine];
+
+  function totals(engine: Engine) {
+    const mine = (inv?.layers ?? []).filter(
+      (l) => l.engine === engine && l.in_prompt,
+    );
+    const always = mine
+      .filter((l) => l.load === "always")
+      .reduce((a, l) => a + l.token_estimate, 0);
+    const rest = mine
+      .filter((l) => l.load !== "always")
+      .reduce((a, l) => a + l.token_estimate, 0);
+    return { always, rest };
+  }
+
+  return (
+    <div className="ctx-panel">
+      <div className="ctx-controls">
+        <select value={cwd} onChange={(e) => setCwd(e.target.value)}>
+          {projects.length === 0 && <option value="">— no projects —</option>}
+          {projects.map((p) => (
+            <option key={p.id} value={p.label}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <div className="ctx-scope">
+          {(["both", "claude", "codex"] as EngineScope[]).map((s) => (
+            <button
+              key={s}
+              className={scope === s ? "on" : ""}
+              onClick={() => setScope(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {inv && (
+        <>
+          {engines.map((engine) => {
+            const mine = inv.layers.filter((l) => l.engine === engine);
+            if (mine.length === 0) return null;
+            const t = totals(engine);
+            const rest = mine.filter((l) => l.load !== "always");
+            // Two different things hide in here: prompt text that loads on a
+            // trigger, and config that never becomes prompt text at all.
+            // Calling the second "loaded on trigger · ~0" would be wrong.
+            const triggered = rest.filter((l) => l.in_prompt);
+            const config = rest.filter((l) => !l.in_prompt);
+            const restLabel = [
+              triggered.length > 0
+                ? `${triggered.length} on trigger · ~${t.rest.toLocaleString()}`
+                : null,
+              config.length > 0 ? `${config.length} config (not prompt text)` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            const open = showRest.has(engine);
+            const visible = open ? mine : mine.filter((l) => l.load === "always");
+            return (
+              <div key={engine} className="ctx-engine">
+                <div className="ctx-engine-head">
+                  <strong>{engine === "claude" ? "Claude Code" : "Codex CLI"}</strong>
+                  <span className="caption">
+                    ~{t.always.toLocaleString()} always · ~
+                    {t.rest.toLocaleString()} on trigger
+                  </span>
+                </div>
+                <ul className="ctx-layers">
+                  {visible.map((l) => (
+                    <li
+                      key={`${l.engine}:${l.path}`}
+                      className={l.load === "always" ? "always" : ""}
+                    >
+                      <label title={l.path}>
+                        <input
+                          type="checkbox"
+                          checked={bodies.has(l.path)}
+                          disabled={!l.in_prompt || !l.exists}
+                          onChange={() => toggleBody(l.path)}
+                        />
+                        <span className="ctx-kind">{l.kind}</span>
+                        <span className="ctx-path">{shortPath(l.path)}</span>
+                      </label>
+                      <span className="ctx-tok">
+                        {l.in_prompt ? `~${l.token_estimate.toLocaleString()}` : "—"}
+                        {l.origin_class === "company" && (
+                          <span className="warn" title="from a company repository">
+                            {" "}
+                            ⚠
+                          </span>
+                        )}
+                        {!l.exists && (
+                          <span className="warn" title="import target is missing">
+                            {" "}
+                            ✕
+                          </span>
+                        )}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {rest.length > 0 && (
+                  <button
+                    className="ctx-more"
+                    onClick={() =>
+                      setShowRest((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(engine)) next.delete(engine);
+                        else next.add(engine);
+                        return next;
+                      })
+                    }
+                  >
+                    {open ? `hide ${rest.length} more` : `show ${restLabel}`}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          <div className="ctx-build">
+            <input
+              className="name-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="target model (who reads this harness)"
+            />
+            <button disabled={busy || !cwd} onClick={build}>
+              {busy ? "…" : "Build report"}
+            </button>
+          </div>
+
+          <p className="caption">
+            {bodies.size === 0
+              ? "Headings only — tick a file to include its text."
+              : `${bodies.size} file ${bodies.size === 1 ? "body" : "bodies"} will be included.`}
+          </p>
+        </>
+      )}
+
+      {built && (
+        <div className="ctx-out">
+          <div className="ctx-out-head">
+            <span className="caption">id {built.report_id.slice(0, 12)}</span>
+            <div className="ctx-actions">
+              <button onClick={() => copy("both")}>Copy prompt</button>
+              <button className="linklike" onClick={() => copy("report")}>
+                report only
+              </button>
+            </div>
+          </div>
+          {copied && <p className="caption">{copied}</p>}
+          <textarea
+            className="content-area ctx-preview"
+            readOnly
+            spellCheck={false}
+            value={built.prompt}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// Collapse the home prefix so a path fits the popover without hiding which
+/// file it is.
+function shortPath(p: string): string {
+  const m = p.match(/^\/Users\/[^/]+\/(.*)$/);
+  return m ? `~/${m[1]}` : p;
+}
