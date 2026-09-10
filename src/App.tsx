@@ -1335,6 +1335,12 @@ function ContextPanel(props: { onError: (e: string | null) => void }) {
               <button className="linklike" onClick={() => copy("report")}>
                 report only
               </button>
+              <button
+                className="linklike"
+                onClick={() => invoke("open_compare_window").catch((e) => onError(String(e)))}
+              >
+                paste answer
+              </button>
             </div>
           </div>
           {copied && <p className="caption">{copied}</p>}

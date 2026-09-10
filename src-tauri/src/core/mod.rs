@@ -6,6 +6,7 @@ pub mod history;
 pub mod mappings;
 pub mod memory;
 pub mod profile_store;
+pub mod proposal;
 pub mod report;
 pub mod scan;
 pub mod session_lock;

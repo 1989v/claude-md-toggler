@@ -992,3 +992,172 @@ body,
 .ctx-more:hover {
   color: rgba(255, 255, 255, 0.75);
 }
+
+/* --- Compare window (v0.5) -----------------------------------------------
+   A normal resizable window, not the popover: an as-is / to-be pair needs two
+   columns. It loads the same bundle, so it must paint its own opaque ground —
+   `body` is transparent here for the popover's vibrancy. */
+
+.cmp {
+  min-height: 100vh;
+  background: #1c1d22;
+  padding: 18px 22px 40px;
+  user-select: text;
+}
+
+.cmp-head h1 {
+  margin: 0 0 2px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.cmp-input {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.cmp-input .content-area {
+  height: 340px;
+  width: 100%;
+}
+
+.cmp-input-foot {
+  display: flex;
+  gap: 8px;
+}
+
+.cmp-input-foot .name-input {
+  flex: 1;
+}
+
+.cmp-bar,
+.cmp-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.cmp-foot {
+  position: sticky;
+  bottom: 0;
+  background: #1c1d22;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: 10px;
+}
+
+.cmp-foot .name-input {
+  flex: 1;
+  max-width: 260px;
+}
+
+.cmp-warnings {
+  margin: 4px 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: rgba(255, 200, 120, 0.85);
+}
+
+.cmp-group {
+  margin-top: 16px;
+}
+
+.cmp-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cmp-group-head code {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.cmp-finding {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.cmp-finding-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.cmp-why {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-delta {
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+/* Two columns so the change reads as a change. Stacks when the window is
+   narrow rather than squeezing both into unreadable strips. */
+.cmp-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+@media (max-width: 720px) {
+  .cmp-sides {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cmp-sides pre {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.cmp-as-is {
+  background: rgba(220, 80, 80, 0.1);
+  border: 1px solid rgba(220, 80, 80, 0.22);
+}
+
+.cmp-to-be {
+  background: rgba(80, 200, 120, 0.1);
+  border: 1px solid rgba(80, 200, 120, 0.22);
+}
+
+.verdict-remove {
+  background: rgba(220, 80, 80, 0.22);
+}
+
+.verdict-keep {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.verdict-other {
+  background: rgba(255, 200, 120, 0.22);
+}
+
+.cmp-result {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.cmp-result ul {
+  margin: 4px 0;
+  padding-left: 18px;
+  color: rgba(255, 200, 120, 0.85);
+}

@@ -1,6 +1,6 @@
 use std::fs;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::core::composer;
 use crate::core::doctree::{self, DomainApply};
@@ -12,6 +12,7 @@ use crate::core::history::{
 use crate::core::mappings::DirectoryMapping;
 use crate::core::memory::{self, MemoryProject};
 use crate::core::profile_store::{ProfileInfo, COMPOSED_NAME};
+use crate::core::proposal;
 use crate::core::report;
 use crate::core::scan;
 use crate::core::session_lock::{self, SessionGuard};
@@ -1322,4 +1323,152 @@ pub fn build_context_report(
         report: report::render_report(&inv, &options),
         prompt: report::render_prompt(&inv, &options),
     })
+}
+
+/// Outcome of adopting accepted findings into a new profile.
+#[derive(serde::Serialize)]
+pub struct AdoptResult {
+    pub profile: String,
+    pub applied: usize,
+    /// Findings the toggler declined to write, each with the reason. A refusal
+    /// is always reported — an edit that quietly did not happen is worse than
+    /// one that visibly did not.
+    pub refused: Vec<String>,
+}
+
+/// Read a model's answer back into structured findings.
+#[tauri::command]
+pub fn parse_proposal(answer: String) -> Result<proposal::Proposal, String> {
+    proposal::parse_answer(&answer, &default_claude_dir()).map_err(|e| e.to_string())
+}
+
+/// Apply the accepted findings to the file they came from and save the result
+/// as a NEW profile — the live target is never touched here, so the user
+/// reviews the result by toggling it in like any other profile.
+///
+/// Indices refer to `parse_proposal`'s `findings`; the answer is re-parsed
+/// rather than trusting a client-shaped copy. All accepted findings must share
+/// one destination, because one profile is one file.
+#[tauri::command]
+pub fn adopt_findings(
+    answer: String,
+    accepted: Vec<usize>,
+    profile_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AdoptResult, String> {
+    let claude_dir = default_claude_dir();
+    let parsed = proposal::parse_answer(&answer, &claude_dir).map_err(|e| e.to_string())?;
+
+    let mut picked: Vec<proposal::Finding> = Vec::new();
+    for i in accepted {
+        let f = parsed
+            .findings
+            .get(i)
+            .ok_or_else(|| format!("finding {i} is not in this answer"))?;
+        picked.push(f.clone());
+    }
+    if picked.is_empty() {
+        return Err("nothing accepted".to_string());
+    }
+
+    let target = picked[0].target.clone();
+    if picked.iter().any(|f| f.target != target) {
+        return Err(
+            "these findings belong to different files — adopt one file's findings at a time"
+                .to_string(),
+        );
+    }
+
+    match target {
+        proposal::AdoptTarget::GlobalProfile => {
+            let (base, _) = {
+                let store = state.store.lock().map_err(|e| e.to_string())?;
+                let active = store.detect_active().map_err(|e| e.to_string())?;
+                let body = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
+                (body, active)
+            };
+            let (edited, outcome) = proposal::apply_findings(&base, &picked);
+            {
+                let store = state.store.lock().map_err(|e| e.to_string())?;
+                store
+                    .create(&profile_name, &edited)
+                    .map_err(|e| e.to_string())?;
+            }
+            tray::refresh(&app).map_err(|e| e.to_string())?;
+            Ok(AdoptResult {
+                profile: profile_name,
+                applied: outcome.applied,
+                refused: outcome.refused,
+            })
+        }
+        proposal::AdoptTarget::MemoryProfile { project_id } => {
+            let store = memory::store_for(&claude_dir, &project_id);
+            let base = fs::read_to_string(store.target_path()).map_err(|e| e.to_string())?;
+            let (edited, outcome) = proposal::apply_findings(&base, &picked);
+            store
+                .create(&profile_name, &edited)
+                .map_err(|e| e.to_string())?;
+            Ok(AdoptResult {
+                profile: profile_name,
+                applied: outcome.applied,
+                refused: outcome.refused,
+            })
+        }
+        proposal::AdoptTarget::ExportOnly => Err(
+            "these live in files the toggler does not own — use Export instead".to_string(),
+        ),
+    }
+}
+
+/// Write the accepted findings to a file under `~/.claude` and return its path.
+///
+/// No save dialog: the dialog plugin is not wired, and pulling one in for a
+/// single write would add a plugin and a permission for no gain. The path is
+/// predictable and shown to the user.
+#[tauri::command]
+pub fn export_findings_to_file(answer: String, accepted: Vec<usize>) -> Result<String, String> {
+    let md = export_findings(answer, accepted)?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let path = default_claude_dir().join(format!("harness-findings-{stamp}.md"));
+    fs::write(&path, md).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Render accepted findings as a document to apply by hand.
+#[tauri::command]
+pub fn export_findings(answer: String, accepted: Vec<usize>) -> Result<String, String> {
+    let parsed =
+        proposal::parse_answer(&answer, &default_claude_dir()).map_err(|e| e.to_string())?;
+    let picked: Vec<proposal::Finding> = accepted
+        .into_iter()
+        .filter_map(|i| parsed.findings.get(i).cloned())
+        .collect();
+    Ok(proposal::export_markdown(&parsed, &picked))
+}
+
+/// Open (or focus) the compare window.
+///
+/// A separate window rather than a popover pane: an as-is / to-be pair needs
+/// two columns, and the tray popover is 360px wide.
+#[tauri::command]
+pub fn open_compare_window(app: AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    if let Some(win) = app.get_webview_window("compare") {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        &app,
+        "compare",
+        WebviewUrl::App("index.html#compare".into()),
+    )
+    .title("Harness findings")
+    .inner_size(900.0, 700.0)
+    .min_inner_size(600.0, 400.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }

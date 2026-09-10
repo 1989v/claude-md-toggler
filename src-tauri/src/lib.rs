@@ -226,6 +226,11 @@ pub fn run() {
             commands::list_project_doctrees,
             commands::scan_context,
             commands::build_context_report,
+            commands::parse_proposal,
+            commands::adopt_findings,
+            commands::export_findings,
+            commands::export_findings_to_file,
+            commands::open_compare_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
