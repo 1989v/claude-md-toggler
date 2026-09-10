@@ -370,10 +370,18 @@ fn project_id_for(claude_dir: &Path, cwd: &Path) -> Option<String> {
     if claude_dir.join("projects").join(&escaped).is_dir() {
         return Some(escaped);
     }
+    // Claude Code derives the id from whatever path it was launched with, which
+    // may be the pre-symlink form. Match on disk, comparing both shapes.
     crate::core::memory::list_projects(claude_dir)
         .ok()?
         .into_iter()
-        .find(|p| Path::new(&p.label) == cwd)
+        .find(|p| {
+            let label = Path::new(&p.label);
+            label == cwd
+                || fs::canonicalize(label)
+                    .map(|c| c == cwd)
+                    .unwrap_or(false)
+        })
         .map(|p| p.id)
 }
 
@@ -600,6 +608,13 @@ fn collect_capabilities(dir: &Path, engine: Engine, kind: &str, out: &mut Vec<Ca
 ///
 /// Read-only: nothing on disk is created or modified.
 pub fn scan(cwd: &Path, home: &Path, roots: &ScanRoots, scope: EngineScope) -> io::Result<Inventory> {
+    // Normalize once, here, so both engine axes emit the same string for the
+    // same directory. They used to differ — one canonicalized and one did not
+    // — and on macOS, where /var is a symlink to /private/var, that silently
+    // broke every cross-engine pairing.
+    let cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = cwd.as_path();
+
     let classes = OriginClasses::load(&roots.claude_dir);
     let mut layers: Vec<Layer> = Vec::new();
     let mut capabilities: Vec<Capability> = Vec::new();
@@ -862,7 +877,7 @@ fn scan_codex(
     // Claude Code's chain is walked separately in `scan_claude` and is NOT
     // bounded this way.
     if let Some(root) = git_root(cwd) {
-        let here = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let here = cwd.to_path_buf();
         let mut chain: Vec<PathBuf> = Vec::new();
         if here.starts_with(&root) {
             let mut cur = Some(here.as_path());
